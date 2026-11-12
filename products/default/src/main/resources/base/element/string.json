@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "知乎Pura 第三方知乎客户端"
+    },
+    {
+      "name": "ability_desc",
+      "value": "知乎Pura 主入口"
+    },
+    {
+      "name": "ability_label",
+      "value": "知乎Pura"
+    }
+  ]
+}

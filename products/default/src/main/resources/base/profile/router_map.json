@@ -1,0 +1,54 @@
+{
+  "routerMap": [
+    {
+      "name": "content",
+      "buildFunction": "ContentBuilder",
+      "pageSourceFile": "src/main/ets/pages/ContentPage.ets"
+    },
+    {
+      "name": "question",
+      "buildFunction": "QuestionBuilder",
+      "pageSourceFile": "src/main/ets/pages/QuestionPage.ets"
+    },
+    {
+      "name": "comments",
+      "buildFunction": "CommentsBuilder",
+      "pageSourceFile": "src/main/ets/pages/CommentsPage.ets"
+    },
+    {
+      "name": "people",
+      "buildFunction": "PeopleBuilder",
+      "pageSourceFile": "src/main/ets/pages/PeoplePage.ets"
+    },
+    {
+      "name": "search",
+      "buildFunction": "SearchBuilder",
+      "pageSourceFile": "src/main/ets/pages/SearchPage.ets"
+    },
+    {
+      "name": "login",
+      "buildFunction": "LoginBuilder",
+      "pageSourceFile": "src/main/ets/pages/LoginPage.ets"
+    },
+    {
+      "name": "dailystory",
+      "buildFunction": "DailyStoryBuilder",
+      "pageSourceFile": "src/main/ets/pages/DailyStoryPage.ets"
+    },
+    {
+      "name": "history",
+      "buildFunction": "HistoryBuilder",
+      "pageSourceFile": "src/main/ets/pages/HistoryPage.ets"
+    },
+    {
+      "name": "blocklist",
+      "buildFunction": "BlocklistBuilder",
+      "pageSourceFile": "src/main/ets/pages/BlocklistPage.ets"
+    },
+    {
+      "name": "web",
+      "buildFunction": "WebBuilder",
+      "pageSourceFile": "src/main/ets/pages/WebPage.ets"
+    }
+  ]
+}
