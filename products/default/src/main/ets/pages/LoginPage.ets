@@ -1,166 +1,200 @@
-/**
- * Login page, ported from LoginScreen.kt. Two modes:
- * 1. WebView login at zhihu.com/signin, cookies captured via WebCookieManager.
- * 2. Manual cookie string paste (must contain z_c0).
- */
-import { webview } from '@kit.ArkWeb';
-import { ZhihuApi, ZhihuSession } from '@ohos/common';
-import { showToast, syncCookiesToWebView, APP_COLOR_BLUE, APP_COLOR_SECONDARY, APP_COLOR_TEXT, APP_COLOR_BG } from '../view/NavHelper';
+import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
+import { ZhihuApi, ZhihuHttpError, ZhihuSession } from '@ohos/common';
+import { pageTitleBar } from '../view/NavigationChrome';
+import { PhoneLoginPane } from '../view/PhoneLoginPane';
+import { QrLoginPane } from '../view/QrLoginPane';
+import { QrSecurityVerificationPane } from '../view/QrSecurityVerificationPane';
+import { showToast, syncCookiesToWebView, APP_COLOR_BLUE, APP_COLOR_CARD, APP_COLOR_SECONDARY,
+  APP_COLOR_TEXT } from '../view/NavHelper';
+
+enum LoginMethod {
+  Phone,
+  Qr,
+  Cookie
+}
 
 @Component
 export struct LoginPage {
   pathStack: NavPathStack = new NavPathStack();
-  @State useWebLogin: boolean = true;
-  @State cookieInput: string = '';
-  @State isSubmitting: boolean = false;
-  private webController: webview.WebviewController = new webview.WebviewController();
+  @State private method: LoginMethod = LoginMethod.Phone;
+  @State private verificationUrl: string = '';
+  @State private cookieInput: string = '';
+  @State private isSubmitting: boolean = false;
+  @State private errorMessage: string = '';
+  private qrCookies: string = '';
+  private verificationCookies: string = '';
+  private attempt: number = 0;
 
-  private finishLogin(): void {
-    const session = ZhihuSession.getInstance();
-    AppStorage.setOrCreate('zhihuLoggedIn', session.isLoggedIn());
-    AppStorage.setOrCreate('zhihuUserName', session.user.name);
-    AppStorage.setOrCreate('zhihuUserAvatar', session.user.avatarUrl);
-    syncCookiesToWebView();
-    showToast(this.getUIContext(), '登录成功');
-    this.pathStack.pop();
+  aboutToDisappear(): void {
+    this.attempt++;
+    this.cookieInput = '';
+    this.qrCookies = '';
+    this.verificationCookies = '';
   }
 
-  private completeWebLogin(): void {
-    if (this.isSubmitting) {
+  private selectMethod(method: LoginMethod): void {
+    if (this.method === method || this.isSubmitting) {
       return;
     }
-    this.isSubmitting = true;
+    this.attempt++;
+    this.method = method;
+    this.errorMessage = '';
+    this.cookieInput = '';
+    this.verificationUrl = '';
+    this.verificationCookies = '';
+    this.qrCookies = '';
+  }
+
+  private showVerification(url: string, cookies: string): void {
+    this.verificationCookies = cookies;
+    this.verificationUrl = url;
+  }
+
+  private returnToQr(cookies: string): void {
+    this.qrCookies = cookies;
+    this.verificationCookies = '';
+    this.verificationUrl = '';
+    this.errorMessage = '';
+  }
+
+  private async authenticate(cookies: string): Promise<boolean> {
+    if (this.isSubmitting) {
+      return false;
+    }
+    const attempt = ++this.attempt;
     const session = ZhihuSession.getInstance();
+    this.isSubmitting = true;
+    this.errorMessage = '';
     try {
-      const cookieText = webview.WebCookieManager.fetchCookieSync('https://www.zhihu.com');
-      if (cookieText.length > 0) {
-        session.applyCookieString(cookieText);
+      const context = this.getUIContext().getHostContext();
+      if (!context) {
+        throw new Error('登录页面未就绪，请重试');
       }
+      await session.init(context);
+      const candidate = await ZhihuApi.getInstance().verifyLoginCookie(cookies.trim());
+      if (this.attempt !== attempt) {
+        return false;
+      }
+      await session.adoptVerifiedSession(candidate);
+      AppStorage.setOrCreate('zhihuLoggedIn', true);
+      AppStorage.setOrCreate('zhihuUserName', session.user.name);
+      AppStorage.setOrCreate('zhihuUserAvatar', session.user.avatarUrl);
+      syncCookiesToWebView();
+      if (this.attempt === attempt) {
+        this.cookieInput = '';
+        showToast(this.getUIContext(), '登录成功');
+        this.pathStack.pop();
+      }
+      return true;
     } catch (error) {
-      // cookie fetch is best-effort
-    }
-    if (!session.isLoggedIn()) {
-      this.isSubmitting = false;
-      showToast(this.getUIContext(), '未检测到登录状态，请先在页面中完成登录');
-      return;
-    }
-    ZhihuApi.getInstance().refreshMe()
-      .then((): void => {
+      if (this.attempt === attempt) {
+        this.errorMessage = error instanceof ZhihuHttpError ? '连接知乎失败，请重试' :
+          (error as Error).message || '登录失败，请重试';
+      }
+      return false;
+    } finally {
+      if (this.attempt === attempt) {
         this.isSubmitting = false;
-        this.finishLogin();
-      })
-      .catch((): void => {
-        // cookie may still be valid even if /me fails
-        this.isSubmitting = false;
-        if (session.isLoggedIn()) {
-          this.finishLogin();
-        } else {
-          showToast(this.getUIContext(), '登录信息校验失败，请重试');
-        }
-      });
+      }
+    }
   }
 
-  private submitCookieString(): void {
-    const cookieString = this.cookieInput.trim();
-    if (cookieString.length === 0) {
-      showToast(this.getUIContext(), '请粘贴 Cookie');
-      return;
+  @Builder
+  methodButton(title: string, method: LoginMethod) {
+    Button(title)
+      .layoutWeight(1)
+      .height(42)
+      .fontSize(14)
+      .fontColor(this.method === method ? APP_COLOR_BLUE : APP_COLOR_TEXT)
+      .backgroundColor(this.method === method ? '#EDF4FF' : Color.Transparent)
+      .enabled(!this.isSubmitting)
+      .accessibilitySelected(this.method === method)
+      .onClick(() => { this.selectMethod(method); })
+  }
+
+  @Builder
+  cookiePane() {
+    Scroll() {
+      Column({ space: 16 }) {
+        Text('粘贴已登录知乎网页的 Cookie')
+          .fontSize(14)
+          .fontColor(APP_COLOR_SECONDARY)
+          .width('100%')
+        TextArea({ placeholder: 'z_c0=…', text: this.cookieInput })
+          .fontSize(14)
+          .height(112)
+          .width('100%')
+          .borderRadius(12)
+          .backgroundColor('#F5F6F8')
+          .onChange((value: string) => { this.cookieInput = value; })
+        Button(this.isSubmitting ? '正在校验…' : '登录')
+          .height(44)
+          .width('100%')
+          .backgroundColor(APP_COLOR_BLUE)
+          .enabled(!this.isSubmitting && this.cookieInput.trim().length > 0)
+          .onClick(() => { this.authenticate(this.cookieInput); })
+      }
+      .constraintSize({ maxWidth: 480 })
+      .width('100%')
+      .padding({ left: 24, right: 24, top: 28, bottom: 20 })
     }
-    if (this.isSubmitting) {
-      return;
-    }
-    this.isSubmitting = true;
-    ZhihuApi.getInstance().loginWithCookieString(cookieString)
-      .then((): void => {
-        this.isSubmitting = false;
-        this.finishLogin();
-      })
-      .catch((): void => {
-        this.isSubmitting = false;
-        showToast(this.getUIContext(), 'Cookie 无效或已过期');
-      });
+    .width('100%')
+    .height('100%')
   }
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
       Column() {
-        Row({ space: 8 }) {
-          Text('网页登录')
-            .fontSize(14)
-            .fontColor(this.useWebLogin ? APP_COLOR_BLUE : APP_COLOR_TEXT)
-            .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-            .backgroundColor(this.useWebLogin ? '#E8F1FF' : '#F0F0F0')
-            .borderRadius(16)
-            .onClick(() => {
-              this.useWebLogin = true;
-            })
-          Text('粘贴 Cookie')
-            .fontSize(14)
-            .fontColor(!this.useWebLogin ? APP_COLOR_BLUE : APP_COLOR_TEXT)
-            .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-            .backgroundColor(!this.useWebLogin ? '#E8F1FF' : '#F0F0F0')
-            .borderRadius(16)
-            .onClick(() => {
-              this.useWebLogin = false;
-            })
+        Row({ space: 4 }) {
+          this.methodButton('手机号登录', LoginMethod.Phone)
+          this.methodButton('二维码登录', LoginMethod.Qr)
+          this.methodButton('Cookie', LoginMethod.Cookie)
         }
-        .width('100%')
-        .justifyContent(FlexAlign.Center)
-        .padding({ top: 10, bottom: 10 })
+        .padding(4)
+        .width('92%')
+        .constraintSize({ maxWidth: 480 })
+        .backgroundColor('#F5F6F8')
+        .borderRadius(25)
+        .margin({ top: 8, bottom: 10 })
 
-        if (this.useWebLogin) {
-          Column() {
-            Web({ src: 'https://www.zhihu.com/signin?next=%2F', controller: this.webController })
-              .layoutWeight(1)
-              .width('100%')
-            Button(this.isSubmitting ? '校验中…' : '我已完成登录')
-              .fontSize(15)
-              .height(44)
-              .width('90%')
-              .backgroundColor(APP_COLOR_BLUE)
-              .margin({ top: 12, bottom: 16 })
-              .onClick(() => {
-                this.completeWebLogin();
-              })
-          }
-          .width('100%')
-          .layoutWeight(1)
-        } else {
-          Column({ space: 12 }) {
-            Text('从浏览器登录知乎后，复制完整 Cookie 字符串（必须包含 z_c0）并粘贴到下方')
-              .fontSize(13)
-              .fontColor(APP_COLOR_SECONDARY)
-              .width('90%')
-              .textAlign(TextAlign.Center)
-            TextArea({ placeholder: 'z_c0=...; d_c0=...; _xsrf=...', text: this.cookieInput })
-              .fontSize(13)
-              .height(120)
-              .width('90%')
-              .backgroundColor('#FFFFFF')
-              .borderRadius(8)
-              .onChange((value: string) => {
-                this.cookieInput = value;
-              })
-            Button(this.isSubmitting ? '校验中…' : '登录')
-              .fontSize(15)
-              .height(44)
-              .width('90%')
-              .backgroundColor(APP_COLOR_BLUE)
-              .onClick(() => {
-                this.submitCookieString();
-              })
-          }
-          .width('100%')
-          .layoutWeight(1)
-          .justifyContent(FlexAlign.Center)
+        if (this.errorMessage) {
+          Text(this.errorMessage)
+            .fontSize(13)
+            .fontColor('#B93738')
+            .padding({ left: 18, right: 18, bottom: 8 })
         }
+
+        Column() {
+          if (this.method === LoginMethod.Phone) {
+            PhoneLoginPane({
+              onAuthenticated: (cookies: string): Promise<boolean> => this.authenticate(cookies)
+            })
+          } else if (this.method === LoginMethod.Qr && !this.verificationUrl) {
+            QrLoginPane({
+              initialCookies: this.qrCookies,
+              onAuthenticated: (cookies: string): Promise<boolean> => this.authenticate(cookies),
+              onVerification: (url: string, cookies: string): void => { this.showVerification(url, cookies); }
+            })
+          } else if (this.method === LoginMethod.Cookie) {
+            this.cookiePane()
+          } else {
+            QrSecurityVerificationPane({
+              url: this.verificationUrl,
+              initialCookies: this.verificationCookies,
+              onReturnToQr: (cookies: string): void => { this.returnToQr(cookies); }
+            })
+          }
+        }
+        .layoutWeight(1)
+        .width('100%')
       }
       .width('100%')
       .height('100%')
-      .backgroundColor(APP_COLOR_BG)
+      .backgroundColor(APP_COLOR_CARD)
     }
-    .title('登录知乎')
-    .backgroundColor(APP_COLOR_BG)
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .titleBar(pageTitleBar('登录知乎'))
+    .backgroundColor(APP_COLOR_CARD)
     .onReady((context: NavDestinationContext) => {
       this.pathStack = context.pathStack;
     })

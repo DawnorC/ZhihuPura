@@ -3,6 +3,7 @@
  */
 import { ZhihuHttp, ZhihuHttpResponse } from './ZhihuHttp';
 import { ZhihuSession } from './ZhihuSession';
+import { http } from '@kit.NetworkKit';
 import { ZhihuContentType } from './ZhihuContentType';
 import {
   ZhihuFeedPage,
@@ -12,6 +13,9 @@ import {
   ZhihuPerson,
   ZhihuDailySection,
   ZhihuDailyDetail,
+  OnlineHistoryEntry,
+  OnlineHistoryPage,
+  ZhihuCollectionPage,
   IRawPerson,
   IRawTarget,
   parseFeedResponse,
@@ -22,10 +26,37 @@ import {
   parseCommentsResponse,
   parseDailyResponse,
   parseDailyDetail,
+  parseOnlineHistory,
+  parseCollections,
+  parseCollectionItems,
   buildPinHtml,
   stripHtml,
   formatCount
 } from './ZhihuModels';
+
+export interface ZhihuSearchFilters {
+  type: string;
+  sort: string;
+  time: string;
+}
+
+interface HotSearchResponse {
+  hot_search_queries?: HotSearchEntry[];
+}
+
+interface HotSearchEntry {
+  query?: string;
+}
+
+interface OnlineHistoryPair {
+  content_token: string;
+  content_type: string;
+}
+
+interface DeleteOnlineHistoryRequest {
+  pairs: OnlineHistoryPair[];
+  clear: boolean;
+}
 
 export class ZhihuApi {
   private static readonly instance: ZhihuApi = new ZhihuApi();
@@ -61,16 +92,21 @@ export class ZhihuApi {
   }
 
   public fetchQuestionAnswers(questionId: string, url: string | null, order: string): Promise<ZhihuFeedPage> {
-    const targetUrl = url !== null && url.length > 0 ? url :
-      'https://www.zhihu.com/api/v4/questions/' + questionId + '/feeds?limit=10&offset=0&order=' + order +
-      '&include=data%5B*%5D.is_normal%2Ccollapsed_count%2Creviewing_count%2Ccan_comment%2Ccomment_count%2Ccontent%2Cvoteup_count%2Cexcerpt%2Ccreated_time%2Cupdated_time%2Crelationship.voting%2Cis_collapsed%2Cthumbnail_info';
+    const endpoint = 'https://www.zhihu.com/api/v4/questions/' + encodeURIComponent(questionId) + '/feeds';
+    const targetUrl = url !== null && url.length > 0 ? url.replace(/^http:\/\//, 'https://') :
+      endpoint + '?limit=20&order=' + order +
+      '&include=data%5B*%5D.content%2Cexcerpt%2Cheadline%2Ctarget.author.badge_v2';
+    if (!targetUrl.startsWith(endpoint + '?')) {
+      return Promise.reject(new Error('回答分页地址无效'));
+    }
     return this.signedGet(targetUrl).then((text: string): ZhihuFeedPage => parseFeedResponse(text));
   }
 
   public fetchAnswer(answerId: string): Promise<ZhihuContent> {
     const url = 'https://www.zhihu.com/api/v4/answers/' + answerId +
       '?include=content,voteup_count,comment_count,created_time,updated_time,excerpt,' +
-      'question,author,relationship.voting,is_collapsed,is_normal,thumbnail_info';
+      'question,author,author.is_followed,reaction,relationship.voting,favlists_count,ip_info,' +
+      'is_collapsed,is_normal,thumbnail_info';
     return this.signedGet(url).then((text: string): ZhihuContent => {
       const content = new ZhihuContent();
       content.kind = ZhihuContentType.Answer;
@@ -87,12 +123,22 @@ export class ZhihuApi {
       content.authorAvatar = raw.author?.avatar_url ?? raw.author?.avatarUrl ?? '';
       content.authorToken = raw.author?.url_token ?? raw.author?.urlToken ?? '';
       content.authorHeadline = raw.author?.headline ?? '';
+      const relation = raw.reaction?.relation;
+      content.authorFollowed =
+        raw.author?.is_following ?? raw.author?.isFollowing ?? raw.author?.is_followed ?? relation?.following ?? false;
       content.voteupCount = raw.voteup_count ?? raw.voteupCount ?? 0;
       content.commentCount = raw.comment_count ?? raw.commentCount ?? 0;
+      content.favoriteCount = raw.favlists_count ?? 0;
+      content.favorited = relation?.faved ?? false;
       content.createdTime = raw.created_time ?? raw.createdTime ?? 0;
       content.updatedTime = raw.updated_time ?? raw.updatedTime ?? 0;
-      content.voting = raw.voting ?? 0;
-      content.questionId = raw.question?.id !== undefined ? String(raw.question.id) : '';
+      const vote = relation?.vote?.toLowerCase();
+      content.voting = vote === 'up' ? 1 : (vote === 'down' ? -1 :
+        (vote === 'neutral' ? 0 : (raw.voting ?? raw.relationship?.voting ?? 0)));
+      content.publishLocation = typeof raw.ip_info === 'string' ? raw.ip_info : '';
+      const questionUrl = raw.question?.url ?? '';
+      const linkedQuestionId = /\/questions?\/(\d+)(?:[/?#]|$)/.exec(questionUrl)?.[1];
+      content.questionId = linkedQuestionId ?? (raw.question?.id !== undefined ? String(raw.question.id) : '');
       content.shareUrl = 'https://www.zhihu.com/question/' + content.questionId + '/answer/' + content.id;
       return content;
     });
@@ -199,10 +245,10 @@ export class ZhihuApi {
     });
   }
 
-  public fetchComments(kind: string, id: string, url: string | null): Promise<ZhihuCommentPage> {
+  public fetchComments(kind: string, id: string, url: string | null, latest: boolean = false): Promise<ZhihuCommentPage> {
     const targetUrl = url !== null && url.length > 0 ? url :
       'https://www.zhihu.com/api/v4/comment_v5/' + kind + '/' + id +
-      '/root_comment?order_by=score&limit=20&status=open';
+      '/root_comment?order_by=' + (latest ? 'ts' : 'score') + '&limit=20&status=open';
     return this.signedGet(targetUrl).then((text: string): ZhihuCommentPage => parseCommentsResponse(text));
   }
 
@@ -219,11 +265,43 @@ export class ZhihuApi {
     return this.http.post(url, body, true).then((): boolean => true);
   }
 
-  public search(query: string, url: string | null): Promise<ZhihuFeedPage> {
-    const targetUrl = url !== null && url.length > 0 ? url :
-      'https://www.zhihu.com/api/v4/search_v3?gk_version=gz-gaokao&t=general&q=' + encodeURIComponent(query) +
-      '&correction=1&offset=0&limit=20&tc=1&ad_info=1';
+  public search(query: string, url: string | null, filters?: ZhihuSearchFilters): Promise<ZhihuFeedPage> {
+    let targetUrl = url ?? '';
+    if (targetUrl.length === 0) {
+      targetUrl = 'https://www.zhihu.com/api/v4/search_v3?gk_version=gz-gaokao&t=general&q=' +
+        encodeURIComponent(query) + '&correction=1&offset=0&limit=20&tc=1&ad_info=1';
+      if (filters !== undefined) {
+        const active = filters.type.length > 0 || filters.sort.length > 0 || filters.time.length > 0;
+        targetUrl += '&search_source=' + (active ? 'Filter' : 'Normal');
+        if (filters.type.length > 0) {
+          targetUrl += '&vertical=' + encodeURIComponent(filters.type) +
+            '&vertical_info=0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C0';
+        }
+        if (filters.sort.length > 0) {
+          targetUrl += '&sort=' + encodeURIComponent(filters.sort);
+        }
+        if (filters.time.length > 0) {
+          targetUrl += '&time_interval=' + encodeURIComponent(filters.time);
+        }
+      }
+    }
     return this.signedGet(targetUrl).then((text: string): ZhihuFeedPage => parseSearchResponse(text));
+  }
+
+  public async fetchHotSearch(): Promise<string[]> {
+    const response = await this.signedGet('https://www.zhihu.com/api/v4/search/hot_search');
+    const raw = JSON.parse(response) as HotSearchResponse;
+    const keywords: string[] = [];
+    for (const entry of raw.hot_search_queries ?? []) {
+      const query = entry.query?.trim() ?? '';
+      if (query.length > 0 && keywords.indexOf(query) < 0) {
+        keywords.push(query);
+        if (keywords.length === 15) {
+          break;
+        }
+      }
+    }
+    return keywords;
   }
 
   public searchSuggest(query: string): Promise<string[]> {
@@ -256,11 +334,95 @@ export class ZhihuApi {
     return this.signedGet(url).then((text: string): IRawPerson => JSON.parse(text) as IRawPerson);
   }
 
+  public async fetchOnlineHistory(nextUrl: string): Promise<OnlineHistoryPage> {
+    const url = nextUrl.length > 0 ? nextUrl.replace(/^http:\/\//, 'https://') :
+      'https://api.zhihu.com/unify-consumption/read_history?offset=0&limit=10';
+    if (!/^https:\/\/api\.zhihu\.com\/unify-consumption\/read_history(?:\?|$)/.test(url)) {
+      throw new Error('在线历史分页地址无效');
+    }
+    return parseOnlineHistory(await this.signedGet(url));
+  }
+
+  private collectionUrl(path: string, nextUrl: string): string {
+    const base = 'https://www.zhihu.com' + path;
+    if (nextUrl.length === 0) {
+      return base + '?offset=0&limit=20';
+    }
+    const url = nextUrl.replace(/^http:\/\//, 'https://');
+    if (url !== base && !url.startsWith(base + '?')) {
+      throw new Error('收藏夹分页地址无效');
+    }
+    return url;
+  }
+
+  public async fetchCollections(nextUrl: string): Promise<ZhihuCollectionPage> {
+    if (!this.session.isLoggedIn()) {
+      throw new Error('请先登录知乎');
+    }
+    if (this.session.user.urlToken.length === 0) {
+      await this.refreshMe();
+    }
+    const token = this.session.user.urlToken;
+    if (token.length === 0) {
+      throw new Error('无法取得知乎账号信息');
+    }
+    const url = this.collectionUrl('/api/v4/people/' + encodeURIComponent(token) + '/collections', nextUrl);
+    return parseCollections(await this.signedGet(url));
+  }
+
+  public async fetchCollectionItems(id: string, nextUrl: string): Promise<ZhihuFeedPage> {
+    if (!this.session.isLoggedIn()) {
+      throw new Error('请先登录知乎');
+    }
+    const url = this.collectionUrl('/api/v4/collections/' + encodeURIComponent(id) + '/items', nextUrl);
+    return parseCollectionItems(await this.signedGet(url));
+  }
+
+  public async deleteOnlineHistory(entry: OnlineHistoryEntry): Promise<void> {
+    if (!entry.contentToken || !entry.contentType) {
+      throw new Error('缺少在线历史记录标识');
+    }
+    const pair: OnlineHistoryPair = {
+      content_token: entry.contentToken,
+      content_type: entry.contentType
+    };
+    const body: DeleteOnlineHistoryRequest = { pairs: [pair], clear: false };
+    await this.http.ensureDevice();
+    await this.http.post('https://api.zhihu.com/read_history/batch_del', JSON.stringify(body), true);
+  }
+
   public voteContent(kind: string, id: string, voteType: string): Promise<void> {
     const url = 'https://www.zhihu.com/api/v4/' + kind + '/' + id + '/voteup';
     const bodyObj: Record<string, string> = { 'type': voteType };
     return this.http.post(url, JSON.stringify(bodyObj), true).then((): void => {
     });
+  }
+
+  public async voteAnswer(id: string, voteType: string): Promise<number | undefined> {
+    const url = 'https://www.zhihu.com/api/v4/answers/' + encodeURIComponent(id) + '/voters';
+    const body: Record<string, string> = { 'type': voteType };
+    const response = await this.http.post(url, JSON.stringify(body), true);
+    if (response.text.trim().length === 0) {
+      return undefined;
+    }
+    const raw = JSON.parse(response.text) as IRawTarget;
+    return raw.voteup_count ?? raw.voteupCount;
+  }
+
+  public async fetchAnswerCollections(id: string, nextUrl: string): Promise<ZhihuCollectionPage> {
+    const url = 'https://api.zhihu.com/collections/contents/answer/' + encodeURIComponent(id);
+    const target = nextUrl ? nextUrl.replace(/^http:\/\//, 'https://') : url + '?limit=50';
+    if (!target.startsWith(url + '?')) {
+      throw new Error('收藏夹分页地址无效');
+    }
+    const response = await this.http.get(target, false);
+    return parseCollections(response.text);
+  }
+
+  public async setAnswerFavorite(id: string, collectionId: string, add: boolean): Promise<void> {
+    const url = 'https://api.zhihu.com/collections/contents/answer/' + encodeURIComponent(id);
+    const key = add ? 'add_collections' : 'remove_collections';
+    await this.http.putForm(url, key + '=' + encodeURIComponent(collectionId));
   }
 
   public followPeople(urlToken: string, follow: boolean): Promise<void> {
@@ -288,27 +450,58 @@ export class ZhihuApi {
     return this.http.get(url, false).then((response: ZhihuHttpResponse): ZhihuDailyDetail => parseDailyDetail(response.text));
   }
 
-  /**
-   * Login with a raw cookie string (contains z_c0). Verifies via /api/v4/me.
-   */
+  public async verifyLoginCookie(cookieString: string): Promise<ZhihuSession> {
+    const candidate = new ZhihuSession();
+    candidate.applyCookieString(cookieString);
+    if (!candidate.isLoggedIn()) {
+      throw new Error('未取得知乎登录凭证');
+    }
+    if (!candidate.getDc0()) {
+      const device = await this.http.requestForLogin(http.RequestMethod.POST, '/udid', candidate, '{}');
+      if (device.status !== 200 || !candidate.getDc0()) {
+        throw new Error('无法初始化知乎会话，请重试');
+      }
+    }
+    const response = await this.http.requestForLogin(http.RequestMethod.GET, '/api/v4/me', candidate, null, true);
+    if (response.status === 403) {
+      throw new Error('知乎暂时限制了账号校验，请稍后重试');
+    }
+    if (response.status !== 200) {
+      throw new Error(response.status === 401 ? '登录已过期，请重新登录' : '知乎账号校验失败，请重试');
+    }
+    let me: IRawPerson;
+    try {
+      me = JSON.parse(response.text) as IRawPerson;
+    } catch (error) {
+      throw new Error('知乎账号响应格式异常，请重试');
+    }
+    if (!me || (typeof me.id !== 'string' && typeof me.id !== 'number') ||
+      String(me.id).trim().length === 0 || !candidate.isLoggedIn()) {
+      throw new Error('知乎未返回有效账号，请重新登录');
+    }
+    this.updateUser(candidate, me);
+    return candidate;
+  }
+
   public async loginWithCookieString(cookieString: string): Promise<void> {
-    this.session.applyCookieString(cookieString);
-    const me = await this.fetchMe();
-    this.session.user.id = me.id ?? '';
-    this.session.user.name = me.name ?? '';
-    this.session.user.avatarUrl = me.avatar_url ?? me.avatarUrl ?? '';
-    this.session.user.urlToken = me.url_token ?? me.urlToken ?? '';
-    this.session.user.headline = me.headline ?? '';
-    await this.session.persist();
+    const candidate = await this.verifyLoginCookie(cookieString);
+    await this.session.adoptVerifiedSession(candidate);
+  }
+
+  private updateUser(session: ZhihuSession, me: IRawPerson): void {
+    session.user.id = String(me.id ?? '');
+    session.user.name = me.name ?? '';
+    session.user.avatarUrl = me.avatar_url ?? me.avatarUrl ?? '';
+    session.user.urlToken = me.url_token ?? me.urlToken ?? '';
+    session.user.headline = me.headline ?? '';
   }
 
   public async refreshMe(): Promise<void> {
+    const revision = this.session.getRevision();
     const me = await this.fetchMe();
-    this.session.user.id = me.id ?? '';
-    this.session.user.name = me.name ?? '';
-    this.session.user.avatarUrl = me.avatar_url ?? me.avatarUrl ?? '';
-    this.session.user.urlToken = me.url_token ?? me.urlToken ?? '';
-    this.session.user.headline = me.headline ?? '';
-    await this.session.persist();
+    if (this.session.getRevision() === revision) {
+      this.updateUser(this.session, me);
+      await this.session.persist();
+    }
   }
 }

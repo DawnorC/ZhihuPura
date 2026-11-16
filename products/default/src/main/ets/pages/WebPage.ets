@@ -1,3 +1,5 @@
+import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
+import { pageTitleBar } from '../view/NavigationChrome';
 /**
  * Generic web fallback page (videos and other unsupported targets open here).
  */
@@ -12,7 +14,7 @@ export struct WebPage {
   private webController: webview.WebviewController = new webview.WebviewController();
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
       Stack() {
         Web({ src: this.url, controller: this.webController })
           .width('100%')
@@ -28,7 +30,8 @@ export struct WebPage {
       .width('100%')
       .height('100%')
     }
-    .title(this.pageTitle)
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .titleBar(pageTitleBar(this.pageTitle))
     .backgroundColor('#FFFFFF')
     .onReady((context: NavDestinationContext) => {
       this.pathStack = context.pathStack;

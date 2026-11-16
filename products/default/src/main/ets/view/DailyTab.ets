@@ -1,14 +1,19 @@
+import { FLOATING_BAR_CLEARANCE, MINI_TITLE_BAR_HEIGHT } from './NavigationChrome';
 /**
  * Zhihu Daily tab, ported from DailyViewModel.kt / ZhihuDailyClient.kt.
  * Sections grouped by date, loads older stories on reach end.
  */
 import { ZhihuApi, ZhihuDailySection, ZhihuDailyStory, ZhihuHttpError } from '@ohos/common';
 import { LoadingView, ErrorView, EmptyView } from './Widgets';
-import { APP_COLOR_BLUE, APP_COLOR_SECONDARY, APP_COLOR_TEXT, APP_COLOR_BG, DailyStoryPageParam } from './NavHelper';
+import { APP_COLOR_TEXT, APP_COLOR_CARD, APP_COLOR_DIVIDER, DailyStoryPageParam } from './NavHelper';
 
 @Component
 export struct DailyTab {
   pathStack: NavPathStack = new NavPathStack();
+  scroller: Scroller = new Scroller();
+  @Prop titleInset: number = MINI_TITLE_BAR_HEIGHT;
+  @StorageProp('floatingBottomBar') floatingBottomBar: boolean = false;
+  @Prop @Watch('refreshFromTab') refreshRequest: number = 0;
   @State sections: ZhihuDailySection[] = [];
   @State isLoading: boolean = true;
   @State hasError: boolean = false;
@@ -18,6 +23,22 @@ export struct DailyTab {
 
   aboutToAppear(): void {
     this.load();
+  }
+
+  private refreshFromTab(): void {
+    if (this.loadingMore || this.refreshRequest === 0 || this.isLoading || this.isRefreshing) {
+      return;
+    }
+    this.isRefreshing = true;
+    this.load();
+  }
+
+  private totalStories(): number {
+    let total = 0;
+    for (let i = 0; i < this.sections.length; i++) {
+      total += this.sections[i].stories.length;
+    }
+    return total;
   }
 
   private load(): void {
@@ -44,7 +65,7 @@ export struct DailyTab {
   }
 
   private loadMore(): void {
-    if (this.loadingMore || this.sections.length === 0) {
+    if (this.loadingMore || this.isRefreshing || this.sections.length === 0) {
       return;
     }
     const lastDate = this.sections[this.sections.length - 1].date;
@@ -66,15 +87,6 @@ export struct DailyTab {
 
   build() {
     Column() {
-      Row() {
-        Text('日报')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(APP_COLOR_TEXT)
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-      .backgroundColor('#FFFFFF')
 
       if (this.isLoading) {
         LoadingView()
@@ -92,7 +104,7 @@ export struct DailyTab {
           .layoutWeight(1)
       } else {
         Refresh({ refreshing: $$this.isRefreshing }) {
-          List() {
+          List({ scroller: this.scroller }) {
             ForEach(this.sections, (section: ZhihuDailySection, sectionIndex: number) => {
               ListItemGroup({ header: this.sectionHeader(section.date) }) {
                 ForEach(section.stories, (story: ZhihuDailyStory, storyIndex: number) => {
@@ -134,11 +146,24 @@ export struct DailyTab {
           }
           .width('100%')
           .height('100%')
-          .backgroundColor(APP_COLOR_BG)
+          .clip(false)
+          .cachedCount(3, true)
+          .contentStartOffset(this.titleInset)
+          .contentEndOffset(this.floatingBottomBar ? FLOATING_BAR_CLEARANCE : 0)
+          .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
+          .backgroundColor(APP_COLOR_CARD)
           .onReachEnd(() => {
             this.loadMore();
           })
+          .onScrollIndex((start: number, end: number) => {
+            // Prefetch ahead so the list rarely reaches its end, where the
+            // HDS title bar forces itself visible.
+            if (this.totalStories() > 0 && end >= this.totalStories() - 8) {
+              this.loadMore();
+            }
+          })
         }
+        .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
         .onRefreshing(() => {
           this.load();
         })
@@ -147,16 +172,31 @@ export struct DailyTab {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(APP_COLOR_BG)
+    .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
+    .backgroundColor(APP_COLOR_CARD)
+  }
+
+  private formatSectionDate(date: string): string {
+    const parts = /^(\d{4})(\d{2})(\d{2})$/.exec(date);
+    return parts ? parts[1] + '年' + Number(parts[2]) + '月' + Number(parts[3]) + '日' : date;
   }
 
   @Builder
   sectionHeader(date: string) {
-    Text(date.length > 0 ? '知乎日报 · ' + date : '知乎日报')
-      .fontSize(13)
-      .fontColor(APP_COLOR_BLUE)
+    if (date.length > 0) {
+      Row({ space: 12 }) {
+        Text(this.formatSectionDate(date))
+          .fontSize(12)
+          .fontWeight(FontWeight.Medium)
+          .fontColor('#62676F')
+        Divider()
+          .strokeWidth(1)
+          .color(APP_COLOR_DIVIDER)
+          .layoutWeight(1)
+      }
       .width('100%')
-      .padding({ left: 16, top: 12, bottom: 8 })
-      .backgroundColor(APP_COLOR_BG)
+      .padding({ left: 16, right: 16, top: 12, bottom: 8 })
+      .backgroundColor(APP_COLOR_CARD)
+    }
   }
 }

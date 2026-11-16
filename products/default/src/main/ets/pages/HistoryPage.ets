@@ -1,9 +1,12 @@
+import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
+import { pageTitleBar } from '../view/NavigationChrome';
 import { HistoryEntry, HistoryStore, formatRelativeTime } from '@ohos/common';
 import {
   APP_COLOR_BG, APP_COLOR_BLUE, APP_COLOR_CARD, APP_COLOR_DIVIDER, APP_COLOR_SECONDARY, APP_COLOR_TEXT,
   ContentPageParam, DailyStoryPageParam, QuestionPageParam, showToast
 } from '../view/NavHelper';
 import { EmptyView, ErrorView, LoadingView } from '../view/Widgets';
+import { OnlineHistoryList } from '../view/OnlineHistoryList';
 
 @Component
 export struct HistoryPage {
@@ -11,6 +14,7 @@ export struct HistoryPage {
   @State entries: HistoryEntry[] = [];
   @State loading: boolean = true;
   @State failed: boolean = false;
+  @State online: boolean = false;
 
   private async refresh(): Promise<void> {
     try {
@@ -57,7 +61,42 @@ export struct HistoryPage {
   }
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
+      Column() {
+        Row({ space: 8 }) {
+          Button('本机历史')
+            .backgroundColor(this.online ? APP_COLOR_SECONDARY : APP_COLOR_BLUE)
+            .onClick(() => { this.online = false; this.refresh(); })
+          Button('在线历史')
+            .backgroundColor(this.online ? APP_COLOR_BLUE : APP_COLOR_SECONDARY)
+            .onClick(() => { this.online = true; })
+        }
+        .width('100%')
+        .padding({ left: 16, right: 16, bottom: 12 })
+        Column() {
+          if (this.online) {
+            OnlineHistoryList({ pathStack: this.pathStack })
+          } else {
+            this.localHistory()
+          }
+        }
+        .width('100%')
+        .layoutWeight(1)
+      }
+      .width('100%')
+      .height('100%')
+    }
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .titleBar(pageTitleBar('浏览历史'))
+    .backgroundColor(APP_COLOR_BG)
+    .onReady((context: NavDestinationContext) => {
+      this.pathStack = context.pathStack;
+    })
+    .onShown(() => { this.refresh(); })
+  }
+
+  @Builder
+  localHistory() {
       if (this.loading) {
         LoadingView()
       } else if (this.failed) {
@@ -100,13 +139,6 @@ export struct HistoryPage {
         .height('100%')
         .divider({ strokeWidth: 1, color: APP_COLOR_DIVIDER, startMargin: 16, endMargin: 16 })
       }
-    }
-    .title('浏览历史')
-    .backgroundColor(APP_COLOR_BG)
-    .onReady((context: NavDestinationContext) => {
-      this.pathStack = context.pathStack;
-    })
-    .onShown(() => { this.refresh(); })
   }
 }
 

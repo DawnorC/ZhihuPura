@@ -48,10 +48,12 @@ export interface IRawPerson {
   voteup_count?: number;
   isFollowing?: boolean;
   is_following?: boolean;
+  is_followed?: boolean;
 }
 
 export interface IRawQuestionRef {
   id?: string;
+  url?: string;
   title?: string;
   name?: string;
   excerpt?: string;
@@ -82,6 +84,17 @@ export interface IRawTopic {
   id?: string;
   name?: string;
   url?: string;
+}
+
+interface IRawAnswerRelation {
+  vote?: string;
+  voting?: number;
+  following?: boolean;
+  faved?: boolean;
+}
+
+interface IRawAnswerReaction {
+  relation?: IRawAnswerRelation;
 }
 
 export interface IRawTarget {
@@ -131,6 +144,10 @@ export interface IRawTarget {
   isFollowing?: boolean;
   is_following?: boolean;
   voting?: number;
+  reaction?: IRawAnswerReaction;
+  relationship?: IRawAnswerRelation;
+  favlists_count?: number;
+  ip_info?: string;
   excerptFull?: string;
   excerpt_full?: string;
 }
@@ -300,13 +317,17 @@ export class ZhihuContent {
   authorAvatar: string = '';
   authorToken: string = '';
   authorHeadline: string = '';
+  authorFollowed: boolean = false;
   voteupCount: number = 0;
   commentCount: number = 0;
+  favoriteCount: number = 0;
+  favorited: boolean = false;
   createdTime: number = 0;
   updatedTime: number = 0;
   voting: number = 0;
   questionId: string = '';
   shareUrl: string = '';
+  publishLocation: string = '';
 }
 
 export class ZhihuQuestion {
@@ -614,6 +635,15 @@ export function parseHotListResponse(text: string): ZhihuFeedPage {
       if (item === null) {
         continue;
       }
+      if (item.contentType === ZhihuContentType.Question) {
+        // Hot-list IDs can exceed the precision of a JSON number. The link preserves the exact digits.
+        const urlId = /^(?:https?:\/\/)?(?:www\.|api\.)?zhihu\.com\/(?:api\/v4\/)?questions?\/(\d+)(?:[/?#]|$)/
+          .exec(target.url ?? '')?.[1];
+        if (urlId !== undefined) {
+          item.id = urlId;
+          item.questionId = urlId;
+        }
+      }
       const detailText = entry.detail_text ?? entry.detailText ?? '';
       if (detailText.length > 0) {
         item.details = detailText;
@@ -653,6 +683,90 @@ export function parseContentListResponse(text: string): ZhihuFeedPage {
   page.nextUrl = paging?.next ?? paging?.next_url ?? '';
   page.isEnd = paging?.is_end ?? paging?.isEnd ?? false;
   return page;
+}
+
+export interface ZhihuCollection {
+  id: string;
+  title: string;
+  description: string;
+  isPublic: boolean;
+  count: number;
+  isFavorited?: boolean;
+}
+
+export class ZhihuCollectionPage {
+  items: ZhihuCollection[] = [];
+  nextUrl: string = '';
+}
+
+interface RawCollection {
+  id?: string | number;
+  title?: string;
+  description?: string;
+  is_public?: boolean;
+  isPublic?: boolean;
+  item_count?: number;
+  itemCount?: number;
+  answer_count?: number;
+  is_favorited?: boolean;
+  isFavorited?: boolean;
+}
+
+interface RawCollectionPage {
+  data?: RawCollection[];
+  paging?: IRawPaging;
+}
+
+interface RawCollectionItem {
+  content?: IRawTarget;
+}
+
+interface RawCollectionItemPage {
+  data?: RawCollectionItem[];
+  paging?: IRawPaging;
+}
+
+export function parseCollections(text: string): ZhihuCollectionPage {
+  const raw = JSON.parse(text) as RawCollectionPage;
+  if (!Array.isArray(raw.data)) {
+    throw new Error('收藏夹响应格式异常');
+  }
+  const result = new ZhihuCollectionPage();
+  for (const entry of raw.data) {
+    if (entry.id === undefined) {
+      continue;
+    }
+    const collection: ZhihuCollection = {
+      id: String(entry.id),
+      title: stripHtml(entry.title ?? '') || '收藏夹',
+      description: stripHtml(entry.description ?? ''),
+      isPublic: entry.is_public ?? entry.isPublic ?? false,
+      count: entry.item_count ?? entry.itemCount ?? entry.answer_count ?? 0,
+      isFavorited: entry.is_favorited ?? entry.isFavorited
+    };
+    result.items.push(collection);
+  }
+  if (!(raw.paging?.is_end ?? raw.paging?.isEnd ?? false)) {
+    result.nextUrl = raw.paging?.next ?? raw.paging?.next_url ?? '';
+  }
+  return result;
+}
+
+export function parseCollectionItems(text: string): ZhihuFeedPage {
+  const raw = JSON.parse(text) as RawCollectionItemPage;
+  if (!Array.isArray(raw.data)) {
+    throw new Error('收藏内容响应格式异常');
+  }
+  const result = new ZhihuFeedPage();
+  for (const entry of raw.data) {
+    const item = entry.content === undefined ? null : normalizeTarget(entry.content);
+    if (item !== null) {
+      result.items.push(item);
+    }
+  }
+  result.nextUrl = raw.paging?.next ?? raw.paging?.next_url ?? '';
+  result.isEnd = raw.paging?.is_end ?? raw.paging?.isEnd ?? result.nextUrl.length === 0;
+  return result;
 }
 
 export interface IRawComponentImage {
@@ -992,6 +1106,77 @@ export function parseMobileHomeFeedResponse(text: string): ZhihuFeedPage {
   return page;
 }
 
+export interface OnlineHistoryEntry {
+  item: ZhihuFeedItem;
+  contentToken: string;
+  contentType: string;
+}
+
+export class OnlineHistoryPage {
+  entries: OnlineHistoryEntry[] = [];
+  nextUrl: string = '';
+}
+
+interface RawOnlineHistoryCard {
+  data?: RawOnlineHistoryData;
+}
+
+interface RawOnlineHistoryData {
+  header?: RawOnlineHistoryHeader;
+  action?: RawOnlineHistoryAction;
+  extra?: RawOnlineHistoryExtra;
+}
+
+interface RawOnlineHistoryHeader {
+  title?: string;
+}
+
+interface RawOnlineHistoryAction {
+  url?: string;
+}
+
+interface RawOnlineHistoryExtra {
+  content_token?: string;
+  content_type?: string;
+}
+
+interface RawOnlineHistoryPage {
+  data?: RawOnlineHistoryCard[];
+  paging?: IRawPaging;
+}
+
+export function parseOnlineHistory(text: string): OnlineHistoryPage {
+  const raw = JSON.parse(text) as RawOnlineHistoryPage;
+  const page = new OnlineHistoryPage();
+  if (!Array.isArray(raw.data)) {
+    throw new Error('在线历史响应格式异常');
+  }
+  for (const card of raw.data) {
+    const data = card.data;
+    const title = stripHtml(data?.header?.title ?? '');
+    const token = data?.extra?.content_token ?? '';
+    const type = data?.extra?.content_type ?? '';
+    const route = resolveContentRoute(data?.action?.url ?? '', 0);
+    if (route === null && token.length === 0) {
+      continue;
+    }
+    const item = new ZhihuFeedItem();
+    item.title = title.length > 0 ? title : '知乎内容';
+    if (route !== null) {
+      item.id = route.id;
+      item.questionId = route.questionId;
+      item.contentType = route.contentType;
+    }
+    const entry: OnlineHistoryEntry = { item, contentToken: token, contentType: type };
+    page.entries.push(entry);
+  }
+  const paging = raw.paging;
+  if (!(paging?.is_end ?? paging?.isEnd ?? false)) {
+    page.nextUrl = paging?.next ?? paging?.next_url ?? '';
+  }
+  return page;
+}
+
 export function parseSearchResponse(text: string): ZhihuFeedPage {
   const page = new ZhihuFeedPage();
   if (text.length === 0) {
@@ -1023,6 +1208,8 @@ export function parseSearchResponse(text: string): ZhihuFeedPage {
       }
       const item = normalizeTarget(object);
       if (item !== null) {
+        item.title = stripHtml(item.title);
+        item.questionTitle = stripHtml(item.questionTitle);
         page.items.push(item);
       }
     }

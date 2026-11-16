@@ -1,3 +1,5 @@
+import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
+import { pageTitleBar } from '../view/NavigationChrome';
 /**
  * People profile page, ported from PeopleScreen.kt: profile header + answers/articles tabs.
  */
@@ -115,7 +117,7 @@ export struct PeoplePage {
   }
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
       Column() {
         if (this.isLoading) {
           LoadingView()
@@ -255,7 +257,8 @@ export struct PeoplePage {
       .width('100%')
       .height('100%')
     }
-    .title('个人主页')
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .titleBar(pageTitleBar('个人主页'))
     .backgroundColor(APP_COLOR_BG)
     .onReady((context: NavDestinationContext) => {
       this.pathStack = context.pathStack;

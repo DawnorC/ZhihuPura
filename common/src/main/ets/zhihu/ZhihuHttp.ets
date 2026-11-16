@@ -3,11 +3,15 @@
  * Ported from ZhihuApiClients.kt / PaginationViewModel.kt (Ktor-based).
  */
 import { http } from '@kit.NetworkKit';
+import { rcp } from '@kit.RemoteCommunicationKit';
 import { ZhihuSession } from './ZhihuSession';
 import { createZse96Header, ZSE_93_WEB } from './ZseSign';
 
 export const ZHIHU_WEB_UA: string =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+export const ZHIHU_QR_UA: string =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
 
 export const ZHIHU_APP_UA: string =
   'com.zhihu.android/Futureve/10.61.0 Mozilla/5.0 (Linux; Android 12; sdk_gphone64_arm64 ' +
@@ -29,6 +33,7 @@ export class ZhihuHttpError extends Error {
 export class ZhihuHttpResponse {
   public status: number = 0;
   public text: string = '';
+  public location: string = '';
 }
 
 export class ZhihuHttp {
@@ -39,8 +44,8 @@ export class ZhihuHttp {
     return ZhihuHttp.instance;
   }
 
-  private buildHeaders(url: string, body: string | null, sign: boolean): Record<string, string> {
-    const session = ZhihuSession.getInstance();
+  private buildHeaders(url: string, body: string | null, sign: boolean, contentType: string,
+    session: ZhihuSession): Record<string, string> {
     const headers: Record<string, string> = {};
     headers['User-Agent'] = ZHIHU_WEB_UA;
     headers['Accept'] = '*/*';
@@ -59,7 +64,7 @@ export class ZhihuHttp {
       }
     }
     if (body !== null) {
-      headers['Content-Type'] = 'application/json';
+      headers['Content-Type'] = contentType;
       const xsrf = session.getCookie('_xsrf');
       if (xsrf.length > 0) {
         headers['x-xsrftoken'] = xsrf;
@@ -68,10 +73,9 @@ export class ZhihuHttp {
     return headers;
   }
 
-  private captureCookies(response: http.HttpResponse): void {
-    const session = ZhihuSession.getInstance();
+  private captureCookies(headers: Object, session: ZhihuSession): void {
     const headersRecord: Record<string, Object> =
-      JSON.parse(JSON.stringify(response.header)) as Record<string, Object>;
+      JSON.parse(JSON.stringify(headers)) as Record<string, Object>;
     const keys = Object.keys(headersRecord);
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i].toLowerCase();
@@ -89,90 +93,144 @@ export class ZhihuHttp {
     }
   }
 
-  public request(method: http.RequestMethod, url: string, body: string | null, sign: boolean): Promise<ZhihuHttpResponse> {
+  private async send(method: http.RequestMethod, url: string, body: string | null, headers: Record<string, string>,
+    session: ZhihuSession, timeout: number, maxRedirects?: number): Promise<ZhihuHttpResponse> {
     const client = http.createHttp();
-    const headers = this.buildHeaders(url, body, sign);
+    const revision = session.getRevision();
     const options: http.HttpRequestOptions = {
       method: method,
       header: headers,
       expectDataType: http.HttpDataType.STRING,
-      connectTimeout: 15000,
-      readTimeout: 20000,
-      usingCache: false
+      connectTimeout: Math.min(15000, timeout),
+      readTimeout: timeout,
+      usingCache: false,
+      maxRedirects
     };
     if (body !== null) {
       options.extraData = body;
     }
-    return client.request(url, options).then((response: http.HttpResponse) => {
-      this.captureCookies(response);
+    try {
+      const response = await client.request(url, options);
+      if (session.getRevision() === revision) {
+        this.captureCookies(response.header, session);
+      }
       const result = new ZhihuHttpResponse();
       result.status = response.responseCode;
-      if (typeof response.result === 'string') {
-        result.text = response.result;
-      } else {
-        result.text = '';
-      }
-      client.destroy();
-      if (response.responseCode >= 400) {
-        throw new ZhihuHttpError(response.responseCode,
-          'HTTP ' + response.responseCode + ' ' + result.text.substring(0, 200));
-      }
+      result.text = typeof response.result === 'string' ? response.result : '';
       return result;
-    }).catch((error: Error) => {
+    } catch (error) {
+      throw new ZhihuHttpError(-1, (error as Error).message);
+    } finally {
       client.destroy();
-      if (error instanceof ZhihuHttpError) {
-        throw error;
-      }
-      throw new ZhihuHttpError(-1, error.message);
+    }
+  }
+
+  private async sendLogin(method: http.RequestMethod, url: string, body: string | null,
+    headers: Record<string, string>, session: ZhihuSession): Promise<ZhihuHttpResponse> {
+    // Keep redirects visible and prevent guest or account credentials from being forwarded automatically.
+    const client = rcp.createSession({
+      requestConfiguration: { transfer: { autoRedirect: false, timeout: { connectMs: 8000, transferMs: 12000 } } }
     });
+    const revision = session.getRevision();
+    try {
+      const response = await client.fetch(new rcp.Request(url, method, headers, body ?? undefined));
+      if (session.getRevision() === revision) {
+        this.captureCookies(response.headers, session);
+      }
+      const result = new ZhihuHttpResponse();
+      result.status = response.statusCode;
+      result.text = response.toString() ?? '';
+      const responseHeaders = response.headers as Record<string, string | string[] | undefined>;
+      const locationKey = Object.keys(responseHeaders).find((name: string): boolean => name.toLowerCase() === 'location');
+      const location = locationKey ? responseHeaders[locationKey] : undefined;
+      result.location = typeof location === 'string' ? location : location?.[0] ?? '';
+      return result;
+    } catch (error) {
+      throw new ZhihuHttpError(-1, '连接知乎失败，请重试');
+    } finally {
+      client.close();
+    }
+  }
+
+  public async request(method: http.RequestMethod, url: string, body: string | null, sign: boolean,
+    contentType: string = 'application/json'): Promise<ZhihuHttpResponse> {
+    const session = ZhihuSession.getInstance();
+    const headers = this.buildHeaders(url, body, sign, contentType, session);
+    const response = await this.send(method, url, body, headers, session, 20000);
+    if (response.status >= 400) {
+      throw new ZhihuHttpError(response.status, 'HTTP ' + response.status + ' ' + response.text.substring(0, 200));
+    }
+    return response;
+  }
+
+  public requestForLogin(method: http.RequestMethod, path: string, session: ZhihuSession,
+    body: string | null = null, sign: boolean = false): Promise<ZhihuHttpResponse> {
+    if (!/^\/(?!\/)[^\\\r\n]*$/.test(path)) {
+      return Promise.reject(new Error('知乎登录地址无效'));
+    }
+    const origin = 'https://www.zhihu.com';
+    const url = origin + path;
+    const headers = this.buildHeaders(url, body, sign, 'application/json;charset=UTF-8', session);
+    headers['User-Agent'] = ZHIHU_QR_UA;
+    headers['Accept'] = 'application/json, text/plain, */*';
+    headers['Accept-Language'] = 'en-US,en;q=0.9';
+    headers['sec-ch-ua'] = '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"';
+    headers['sec-ch-ua-mobile'] = '?0';
+    headers['sec-ch-ua-platform'] = '"Windows"';
+    if (/^\/(?:signin|signup|account\/(?:risk_control|unhuman))(?:[/?]|$)/.test(path)) {
+      return this.sendLogin(method, url, body, headers, session);
+    }
+    headers['Referer'] = origin + '/signin';
+    headers['Origin'] = origin;
+    headers['x-requested-with'] = 'fetch';
+    headers['Content-Type'] = 'application/json;charset=UTF-8';
+    if (session.hasCookie('_xsrf')) {
+      headers['x-xsrftoken'] = session.getCookie('_xsrf');
+    }
+    if (path.endsWith('/scan_info')) {
+      headers['Accept'] = '*/*';
+      headers['Referer'] = origin + '/signin?next=%2F';
+      headers['sec-fetch-dest'] = 'empty';
+      headers['sec-fetch-mode'] = 'cors';
+      headers['sec-fetch-site'] = 'same-origin';
+      headers['x-zse-93'] = ZSE_93_WEB;
+    }
+    return this.sendLogin(method, url, body, headers, session);
+  }
+
+  public requestForPhoneLogin(method: http.RequestMethod, path: string, headers: Record<string, string>,
+    session: ZhihuSession, body: string | null = null): Promise<ZhihuHttpResponse> {
+    if (!/^\/(?:captcha|api\/account\/prod\/(?:init\/udid_guest|auth\/digits|sign_in))$/.test(path)) {
+      return Promise.reject(new Error('知乎手机号登录地址无效'));
+    }
+    return this.sendLogin(method, 'https://api.zhihu.com' + path, body, headers, session);
   }
 
   public get(url: string, sign: boolean): Promise<ZhihuHttpResponse> {
     return this.request(http.RequestMethod.GET, url, null, sign);
   }
 
-  /**
-   * Official-app-profile GET (api.zhihu.com mobile endpoints):
-   * app UA + x-api-version/x-app-version/x-app-za, no cookies, no x-zse-96 signing.
-   * Mirrors mobileHomeFeedHttpClient() in AndroidPaginationEnvironment.android.kt.
-   */
-  public appGet(url: string): Promise<ZhihuHttpResponse> {
-    const client = http.createHttp();
+  /** Mobile recommendations use the current session and the upstream mobile request headers. */
+  public async appGet(url: string): Promise<ZhihuHttpResponse> {
+    const target = url.replace(/^http:\/\/api\.zhihu\.com\//, 'https://api.zhihu.com/');
+    if (!/^https:\/\/api\.zhihu\.com\/topstory\/recommend(?:\?[^#\\\s]*)?$/.test(target)) {
+      throw new Error('推荐分页地址无效');
+    }
+    const session = ZhihuSession.getInstance();
     const headers: Record<string, string> = {};
     headers['User-Agent'] = ZHIHU_APP_UA;
     headers['x-api-version'] = '3.1.8';
     headers['x-app-version'] = '10.61.0';
     headers['x-app-za'] = ZHIHU_APP_X_APP_ZA;
-    const options: http.HttpRequestOptions = {
-      method: http.RequestMethod.GET,
-      header: headers,
-      expectDataType: http.HttpDataType.STRING,
-      connectTimeout: 15000,
-      readTimeout: 20000,
-      usingCache: false
-    };
-    return client.request(url, options).then((response: http.HttpResponse) => {
-      this.captureCookies(response);
-      const result = new ZhihuHttpResponse();
-      result.status = response.responseCode;
-      if (typeof response.result === 'string') {
-        result.text = response.result;
-      } else {
-        result.text = '';
-      }
-      client.destroy();
-      if (response.responseCode >= 400) {
-        throw new ZhihuHttpError(response.responseCode,
-          'HTTP ' + response.responseCode + ' ' + result.text.substring(0, 200));
-      }
-      return result;
-    }).catch((error: Error) => {
-      client.destroy();
-      if (error instanceof ZhihuHttpError) {
-        throw error;
-      }
-      throw new ZhihuHttpError(-1, error.message);
-    });
+    const cookies = session.cookieHeader();
+    if (cookies) {
+      headers['Cookie'] = cookies;
+    }
+    const response = await this.send(http.RequestMethod.GET, target, null, headers, session, 20000, 0);
+    if (response.status < 200 || response.status >= 300) {
+      throw new ZhihuHttpError(response.status, 'HTTP ' + response.status);
+    }
+    return response;
   }
 
   public post(url: string, body: string | null, sign: boolean): Promise<ZhihuHttpResponse> {
@@ -181,6 +239,10 @@ export class ZhihuHttp {
 
   public delete(url: string, sign: boolean): Promise<ZhihuHttpResponse> {
     return this.request(http.RequestMethod.DELETE, url, null, sign);
+  }
+
+  public putForm(url: string, body: string): Promise<ZhihuHttpResponse> {
+    return this.request(http.RequestMethod.PUT, url, body, false, 'application/x-www-form-urlencoded');
   }
 
   /**
@@ -196,9 +258,8 @@ export class ZhihuHttp {
         .then(async (): Promise<void> => {
           await session.persist();
         })
-        .catch(async (error: Error): Promise<void> => {
+        .finally((): void => {
           this.deviceReady = null;
-          throw error;
         });
     }
     return this.deviceReady;

@@ -1,3 +1,4 @@
+import { FLOATING_BAR_CLEARANCE, MINI_TITLE_BAR_HEIGHT } from './NavigationChrome';
 /**
  * Generic paged feed list tab, ported from BaseFeedViewModel + HomeFeedViewModel (Kotlin).
  * Handles: paging, pull-to-refresh, infinite scroll, blocklist filtering, login gate.
@@ -11,18 +12,21 @@ import {
 } from '@ohos/common';
 import { FeedCard } from './FeedCard';
 import { LoadingView, ErrorView, EmptyView } from './Widgets';
-import { openFeedItem, APP_COLOR_BLUE, APP_COLOR_SECONDARY, APP_COLOR_TEXT, APP_COLOR_BG } from './NavHelper';
+import { openFeedItem, showToast, APP_COLOR_BLUE, APP_COLOR_SECONDARY, APP_COLOR_TEXT, APP_COLOR_CARD } from './NavHelper';
 
 @Component
 export struct FeedListTab {
   pathStack: NavPathStack = new NavPathStack();
+  scroller: Scroller = new Scroller();
+  @Prop titleInset: number = MINI_TITLE_BAR_HEIGHT;
+  @Prop @Watch('accountContextChanged') sessionReady: boolean = false;
+  @StorageProp('floatingBottomBar') floatingBottomBar: boolean = false;
+  @Prop @Watch('refreshFromTab') refreshRequest: number = 0;
   fetcher: (url: string) => Promise<ZhihuFeedPage> =
     (url: string): Promise<ZhihuFeedPage> => ZhihuApi.getInstance().fetchRecommend(url.length > 0 ? url : null);
-  headerTitle: string = '首页';
-  showSearchEntry: boolean = false;
   loginRequired: boolean = false;
   emptyText: string = '暂时没有内容';
-  @StorageProp('zhihuLoggedIn') loggedIn: boolean = false;
+  @StorageProp('zhihuLoggedIn') @Watch('accountContextChanged') loggedIn: boolean = false;
   @State items: ZhihuFeedItem[] = [];
   @State isLoading: boolean = true;
   @State hasError: boolean = false;
@@ -31,17 +35,47 @@ export struct FeedListTab {
   @State loadingMore: boolean = false;
   private nextUrl: string = '';
   private isEnd: boolean = false;
+  private active: boolean = false;
+  private loadingFirst: boolean = false;
+  private requestGeneration: number = 0;
 
   aboutToAppear(): void {
+    this.active = true;
+    this.accountContextChanged();
+  }
+
+  aboutToDisappear(): void {
+    this.active = false;
+    this.requestGeneration++;
+  }
+
+  private accountContextChanged(): void {
+    if (!this.active || !this.sessionReady) {
+      return;
+    }
+    this.requestGeneration++;
+    this.items = [];
+    this.nextUrl = '';
+    this.isEnd = false;
+    this.loadingFirst = false;
+    this.loadingMore = false;
+    this.isRefreshing = false;
+    this.hasError = false;
     this.loadFirst(true);
   }
 
-  private filterBlocked(page: ZhihuFeedPage): ZhihuFeedItem[] {
+  private canLoad(): boolean {
+    return this.active && this.sessionReady && (!this.loginRequired || this.loggedIn);
+  }
+
+  private filterBlocked(page: ZhihuFeedPage, append: boolean): ZhihuFeedItem[] {
     const store = BlockStore.getInstance();
     const result: ZhihuFeedItem[] = [];
     const existing: string[] = [];
-    for (let i = 0; i < this.items.length; i++) {
-      existing.push(this.items[i].id + '#' + this.items[i].title);
+    if (append) {
+      for (const item of this.items) {
+        existing.push(item.id + '#' + item.title);
+      }
     }
     for (let i = 0; i < page.items.length; i++) {
       const item = page.items[i];
@@ -58,73 +92,94 @@ export struct FeedListTab {
     return result;
   }
 
-  private loadFirst(showSpinner: boolean): void {
-    if (showSpinner) {
-      this.isLoading = true;
+  private refreshFromTab(): void {
+    if (!this.canLoad() || this.loadingFirst || this.refreshRequest === 0 || this.isRefreshing) {
+      return;
     }
+    this.isRefreshing = true;
+    this.loadFirst(false);
+  }
+
+  private loadErrorMessage(error: Error): string {
+    if (error instanceof ZhihuHttpError) {
+      if (error.status === 401) {
+        return this.loggedIn ? '登录状态已失效，请重新登录知乎' : '请登录知乎后重试';
+      }
+      if (error.status === 403) {
+        return '知乎暂时限制了此次内容请求';
+      }
+      if (error.status === 429) {
+        return '请求较频繁，请稍后重试';
+      }
+      if (error.status === -1) {
+        return '连接知乎失败，请检查网络后重试';
+      }
+    }
+    return '暂时无法获取内容，请稍后重试';
+  }
+
+  private async loadFirst(showSpinner: boolean): Promise<void> {
+    if (!this.canLoad() || this.loadingFirst) {
+      return;
+    }
+    const generation = ++this.requestGeneration;
+    this.loadingFirst = true;
+    this.loadingMore = false;
+    this.isLoading = showSpinner;
     this.hasError = false;
-    this.nextUrl = '';
-    this.fetcher('')
-      .then((page: ZhihuFeedPage): void => {
-        this.items = this.filterBlocked(page);
-        this.nextUrl = page.nextUrl;
-        this.isEnd = page.isEnd;
-        this.isLoading = false;
-        this.isRefreshing = false;
-      })
-      .catch((error: ZhihuHttpError): void => {
-        this.isLoading = false;
-        this.isRefreshing = false;
+    try {
+      const page = await this.fetcher('');
+      if (this.requestGeneration !== generation) {
+        return;
+      }
+      this.items = this.filterBlocked(page, false);
+      this.nextUrl = page.nextUrl;
+      this.isEnd = page.isEnd;
+    } catch (error) {
+      if (this.requestGeneration === generation) {
+        const message = this.loadErrorMessage(error as Error);
         if (this.items.length === 0) {
           this.hasError = true;
-          this.errorMessage = error.message;
+          this.errorMessage = message;
+        } else {
+          showToast(this.getUIContext(), message);
         }
-      });
+      }
+    } finally {
+      if (this.requestGeneration === generation) {
+        this.loadingFirst = false;
+        this.isLoading = false;
+        this.isRefreshing = false;
+      }
+    }
   }
 
   private loadMore(): void {
-    if (this.loadingMore || this.isLoading || this.isEnd || this.nextUrl.length === 0) {
+    if (!this.canLoad() || this.loadingMore || this.loadingFirst || this.isRefreshing ||
+      this.isEnd || this.nextUrl.length === 0) {
       return;
     }
+    const generation = this.requestGeneration;
+    const requestUrl = this.nextUrl;
     this.loadingMore = true;
-    this.fetcher(this.nextUrl)
+    this.fetcher(requestUrl)
       .then((page: ZhihuFeedPage): void => {
-        const fresh = this.filterBlocked(page);
+        if (this.requestGeneration !== generation) {
+          return;
+        }
+        const fresh = this.filterBlocked(page, true);
         this.items = this.items.concat(fresh);
         this.nextUrl = page.nextUrl;
-        this.isEnd = page.isEnd;
-        this.loadingMore = false;
+        this.isEnd = page.isEnd || page.nextUrl === requestUrl;
       })
       .catch((): void => {
-        this.loadingMore = false;
-      });
-  }
-
-  @Builder
-  tabBarTop() {
-    Row() {
-      Text(this.headerTitle)
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(APP_COLOR_TEXT)
-      Blank()
-      if (this.showSearchEntry) {
-        Row({ space: 6 }) {
-          Text('搜索')
-            .fontSize(14)
-            .fontColor(APP_COLOR_SECONDARY)
+        // Retain the current page and retry its next URL on the next scroll.
+      })
+      .finally((): void => {
+        if (this.requestGeneration === generation) {
+          this.loadingMore = false;
         }
-        .padding({ left: 14, right: 14, top: 6, bottom: 6 })
-        .backgroundColor('#F0F0F0')
-        .borderRadius(15)
-        .onClick(() => {
-          this.pathStack.pushPathByName('search', '');
-        })
-      }
-    }
-    .width('100%')
-    .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-    .backgroundColor('#FFFFFF')
+      });
   }
 
   @Builder
@@ -152,15 +207,20 @@ export struct FeedListTab {
 
   build() {
     Column() {
-      this.tabBarTop()
-      if (this.loginRequired && !this.loggedIn) {
+      if (this.sessionReady && this.loginRequired && !this.loggedIn) {
         this.loginGate()
       } else {
         Refresh({ refreshing: $$this.isRefreshing }) {
-          List({ space: 0 }) {
-            if (this.items.length === 0 && !this.isLoading && !this.hasError) {
+          List({ space: 0, scroller: this.scroller }) {
+            if (this.items.length === 0) {
               ListItem() {
-                EmptyView({ message: this.emptyText })
+                if (this.isLoading) {
+                  LoadingView()
+                } else if (this.hasError) {
+                  ErrorView({ message: this.errorMessage, onRetry: (): void => { this.loadFirst(true); } })
+                } else {
+                  EmptyView({ message: this.emptyText })
+                }
               }
             }
             ForEach(this.items, (item: ZhihuFeedItem, index: number) => {
@@ -196,11 +256,24 @@ export struct FeedListTab {
           }
           .width('100%')
           .height('100%')
-          .backgroundColor(APP_COLOR_BG)
+          .clip(false)
+          .cachedCount(3, true)
+          .contentStartOffset(this.titleInset)
+          .contentEndOffset(this.floatingBottomBar ? FLOATING_BAR_CLEARANCE : 0)
+          .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
+          .backgroundColor(APP_COLOR_CARD)
           .onReachEnd(() => {
             this.loadMore();
           })
+          .onScrollIndex((start: number, end: number) => {
+            // Prefetch ahead so the list rarely reaches its end, where the
+            // HDS title bar forces itself visible.
+            if (this.items.length > 0 && end >= this.items.length - 4) {
+              this.loadMore();
+            }
+          })
         }
+        .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
         .onRefreshing(() => {
           this.loadFirst(false);
         })
@@ -209,6 +282,7 @@ export struct FeedListTab {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(APP_COLOR_BG)
+    .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
+    .backgroundColor(APP_COLOR_CARD)
   }
 }

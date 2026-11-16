@@ -1,13 +1,19 @@
+import { FLOATING_BAR_CLEARANCE, MINI_TITLE_BAR_HEIGHT } from './NavigationChrome';
 /**
  * Account tab, ported from AccountScreen (账号页): login entry, blocklist, about, logout.
  */
 import { ZhihuSession, ZhihuApi, ZhihuHttpError } from '@ohos/common';
-import { showToast } from './NavHelper';
+import { preferences } from '@kit.ArkData';
+import { clearZhihuWebLogin, showToast } from './NavHelper';
 import { APP_COLOR_BLUE, APP_COLOR_SECONDARY, APP_COLOR_TEXT, APP_COLOR_BG } from './NavHelper';
 
 @Component
 export struct MineTab {
   pathStack: NavPathStack = new NavPathStack();
+  scroller: Scroller = new Scroller();
+  @Prop titleInset: number = MINI_TITLE_BAR_HEIGHT;
+  @StorageProp('floatingBottomBar') floatingBottomBar: boolean = false;
+  @State savingBottomBar: boolean = false;
   @StorageProp('zhihuLoggedIn') loggedIn: boolean = false;
   @StorageProp('zhihuUserName') userName: string = '';
   @StorageProp('zhihuUserAvatar') userAvatar: string = '';
@@ -15,25 +21,34 @@ export struct MineTab {
   private async doLogout(): Promise<void> {
     const session = ZhihuSession.getInstance();
     await session.logout();
+    clearZhihuWebLogin();
     AppStorage.setOrCreate('zhihuLoggedIn', false);
     AppStorage.setOrCreate('zhihuUserName', '');
     AppStorage.setOrCreate('zhihuUserAvatar', '');
     showToast(this.getUIContext(), '已退出登录');
   }
 
+  private async setFloatingBottomBar(enabled: boolean): Promise<void> {
+    if (this.savingBottomBar) {
+      return;
+    }
+    this.savingBottomBar = true;
+    try {
+      const store = await preferences.getPreferences(getContext(this), 'zhihu_appearance');
+      await store.put('floatingBottomBar', enabled);
+      await store.flush();
+      AppStorage.setOrCreate('floatingBottomBar', enabled);
+    } catch (error) {
+      showToast(this.getUIContext(), '底栏设置保存失败');
+    } finally {
+      this.savingBottomBar = false;
+    }
+  }
+
   build() {
     Column() {
-      Row() {
-        Text('我的')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(APP_COLOR_TEXT)
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-      .backgroundColor('#FFFFFF')
 
-      Scroll() {
+      Scroll(this.scroller) {
         Column() {
           Row({ space: 14 }) {
             if (this.userAvatar.length > 0) {
@@ -80,6 +95,19 @@ export struct MineTab {
           })
 
           Column() {
+            Row() {
+              Text('悬浮玻璃底栏').fontSize(15).fontColor(APP_COLOR_TEXT).layoutWeight(1)
+              Toggle({ type: ToggleType.Switch, isOn: this.floatingBottomBar })
+                .enabled(!this.savingBottomBar)
+                .onChange((enabled: boolean) => { this.setFloatingBottomBar(enabled); })
+            }
+            .width('100%')
+            .padding({ left: 16, right: 16, top: 8, bottom: 8 })
+            Divider().color('#F0F0F0').margin({ left: 16 })
+            this.menuItem('收藏夹', (): void => {
+              this.pathStack.pushPathByName('collections', '');
+            })
+            Divider().color('#F0F0F0').margin({ left: 16 })
             this.menuItem('浏览历史', (): void => {
               this.pathStack.pushPathByName('history', '');
             })
@@ -129,14 +157,17 @@ export struct MineTab {
           }
         }
         .width('100%')
+        .padding({ top: this.titleInset, bottom: this.floatingBottomBar ? FLOATING_BAR_CLEARANCE : 12 })
       }
       .layoutWeight(1)
       .align(Alignment.Top)
+      .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.BOTTOM] : [])
       .scrollBar(BarState.Off)
       .backgroundColor(APP_COLOR_BG)
     }
     .width('100%')
     .height('100%')
+    .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.BOTTOM] : [])
     .backgroundColor(APP_COLOR_BG)
   }
 

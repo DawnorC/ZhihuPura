@@ -1,15 +1,20 @@
+import { FLOATING_BAR_CLEARANCE, MINI_TITLE_BAR_HEIGHT } from './NavigationChrome';
 /**
  * Zhihu hot list tab, ported from HotListViewModel.kt.
  */
 import { ZhihuApi, ZhihuFeedItem, ZhihuFeedPage, ZhihuHttpError } from '@ohos/common';
 import { LoadingView, ErrorView, EmptyView } from './Widgets';
-import { openFeedItem, APP_COLOR_SECONDARY, APP_COLOR_TEXT, APP_COLOR_BG } from './NavHelper';
+import { openFeedItem, APP_COLOR_SECONDARY, APP_COLOR_TEXT, APP_COLOR_CARD } from './NavHelper';
 
 const RANK_COLORS: string[] = ['#F04142', '#F5A623', '#F7B500'];
 
 @Component
 export struct HotListTab {
   pathStack: NavPathStack = new NavPathStack();
+  scroller: Scroller = new Scroller();
+  @Prop titleInset: number = MINI_TITLE_BAR_HEIGHT;
+  @StorageProp('floatingBottomBar') floatingBottomBar: boolean = false;
+  @Prop @Watch('refreshFromTab') refreshRequest: number = 0;
   @State items: ZhihuFeedItem[] = [];
   @State isLoading: boolean = true;
   @State hasError: boolean = false;
@@ -17,6 +22,14 @@ export struct HotListTab {
   @State isRefreshing: boolean = false;
 
   aboutToAppear(): void {
+    this.load();
+  }
+
+  private refreshFromTab(): void {
+    if (this.refreshRequest === 0 || this.isLoading || this.isRefreshing) {
+      return;
+    }
+    this.isRefreshing = true;
     this.load();
   }
 
@@ -41,15 +54,6 @@ export struct HotListTab {
 
   build() {
     Column() {
-      Row() {
-        Text('热榜')
-          .fontSize(20)
-          .fontWeight(FontWeight.Bold)
-          .fontColor(APP_COLOR_TEXT)
-      }
-      .width('100%')
-      .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-      .backgroundColor('#FFFFFF')
 
       if (this.isLoading) {
         LoadingView()
@@ -67,7 +71,7 @@ export struct HotListTab {
           .layoutWeight(1)
       } else {
         Refresh({ refreshing: $$this.isRefreshing }) {
-          List() {
+          List({ scroller: this.scroller }) {
             ForEach(this.items, (item: ZhihuFeedItem, index: number) => {
               ListItem() {
                 Row({ space: 12 }) {
@@ -117,9 +121,15 @@ export struct HotListTab {
           }
           .width('100%')
           .height('100%')
-          .backgroundColor(APP_COLOR_BG)
+          .clip(false)
+          .cachedCount(3, true)
+          .contentStartOffset(this.titleInset)
+          .contentEndOffset(this.floatingBottomBar ? FLOATING_BAR_CLEARANCE : 0)
+          .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
+          .backgroundColor(APP_COLOR_CARD)
           .divider({ strokeWidth: 1, color: '#F0F0F0', startMargin: 16 })
         }
+        .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
         .onRefreshing(() => {
           this.load();
         })
@@ -128,6 +138,7 @@ export struct HotListTab {
     }
     .width('100%')
     .height('100%')
-    .backgroundColor(APP_COLOR_BG)
+    .expandSafeArea([SafeAreaType.SYSTEM], this.floatingBottomBar ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.TOP])
+    .backgroundColor(APP_COLOR_CARD)
   }
 }

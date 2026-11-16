@@ -17,6 +17,15 @@ export default class DefaultAbility extends UIAbility {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
+    windowStage.getMainWindowSync().setWindowSystemBarProperties({
+      statusBarColor: '#00000000',
+      navigationBarColor: '#00000000',
+      statusBarContentColor: '#1A1A1A',
+      navigationBarContentColor: '#1A1A1A'
+    }).catch((error: Error) => {
+      hilog.warn(DOMAIN, 'ZhihuPura', 'System bar appearance failed: %{public}s', error.message);
+    });
+
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));

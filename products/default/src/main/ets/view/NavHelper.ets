@@ -11,6 +11,11 @@ export interface ContentPageParam {
   kind: string;
   id: string;
   title: string;
+  questionId?: string;
+  answerIds?: string[];
+  nextAnswerPage?: string;
+  answerListEnd?: boolean;
+  answerOrder?: string;
 }
 
 export interface QuestionPageParam {
@@ -63,8 +68,10 @@ export function syncCookiesToWebView(): void {
     for (let i = 0; i < keys.length; i++) {
       const value = session.getCookie(keys[i]);
       if (value.length > 0) {
-        webview.WebCookieManager.configCookieSync('https://www.zhihu.com', keys[i] + '=' + value + '; Domain=.zhihu.com; Path=/');
-        webview.WebCookieManager.configCookieSync('https://api.zhihu.com', keys[i] + '=' + value + '; Domain=.zhihu.com; Path=/');
+        const attributes = '; Domain=.zhihu.com; Path=/; Secure' + (keys[i] === 'z_c0' ? '; HttpOnly' : '');
+        const cookie = keys[i] + '=' + value + attributes;
+        webview.WebCookieManager.configCookieSync('https://www.zhihu.com', cookie, false, true);
+        webview.WebCookieManager.configCookieSync('https://api.zhihu.com', cookie, false, true);
       }
     }
     webview.WebCookieManager.saveCookieSync();
@@ -73,9 +80,23 @@ export function syncCookiesToWebView(): void {
   }
 }
 
+export function clearZhihuWebLogin(): void {
+  try {
+    const expired = 'z_c0=; Path=/; Max-Age=0; Secure; HttpOnly';
+    const origins: string[] = ['https://www.zhihu.com', 'https://api.zhihu.com'];
+    for (const origin of origins) {
+      webview.WebCookieManager.configCookieSync(origin, expired, false, true);
+      webview.WebCookieManager.configCookieSync(origin, expired + '; Domain=.zhihu.com', false, true);
+    }
+    webview.WebCookieManager.saveCookieSync();
+  } catch (error) {
+    // The native session has already been removed.
+  }
+}
+
 export function openFeedItem(stack: NavPathStack, item: ZhihuFeedItem): void {
   if (item.contentType === ZhihuContentType.Answer) {
-    const param: ContentPageParam = { kind: 'answer', id: item.id, title: item.title };
+    const param: ContentPageParam = { kind: 'answer', id: item.id, title: item.title, questionId: item.questionId };
     stack.pushPathByName('content', param);
     return;
   }

@@ -1,3 +1,5 @@
+import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
+import { pageTitleBar } from '../view/NavigationChrome';
 /**
  * Blocklist management page, ported from the Android app's blocklist settings screen.
  */
@@ -44,7 +46,7 @@ export struct BlocklistPage {
   }
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
       Column() {
         Row({ space: 8 }) {
           TextInput({ placeholder: '输入屏蔽词（支持正则）', text: this.newWord })
@@ -112,7 +114,8 @@ export struct BlocklistPage {
       .height('100%')
       .backgroundColor(APP_COLOR_BG)
     }
-    .title('屏蔽词管理')
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .titleBar(pageTitleBar('屏蔽词管理'))
     .backgroundColor(APP_COLOR_BG)
     .onReady((context: NavDestinationContext) => {
       this.pathStack = context.pathStack;

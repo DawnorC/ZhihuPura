@@ -1,8 +1,11 @@
+import { HdsNavDestination, HdsNavDestinationTitleMode } from '@kit.UIDesignKit';
+import { pageTitleBar, MINI_TITLE_BAR_HEIGHT } from '../view/NavigationChrome';
 /**
  * Zhihu Daily story reader, ported from DailyStoryScreen.kt. Story body rendered in Web.
  */
 import { webview } from '@kit.ArkWeb';
-import { HistoryStore, ZhihuApi, ZhihuDailyDetail, ZhihuHttpError } from '@ohos/common';
+import { HistoryStore, ZhihuApi, ZhihuDailyDetail } from '@ohos/common';
+import { loadReaderDocument, updateReaderTopInset } from '../view/ReaderDocument';
 import { LoadingView, ErrorView } from '../view/Widgets';
 import { DailyStoryPageParam } from '../view/NavHelper';
 
@@ -10,15 +13,29 @@ import { DailyStoryPageParam } from '../view/NavHelper';
 export struct DailyStoryPage {
   pathStack: NavPathStack = new NavPathStack();
   @State detail: ZhihuDailyDetail | null = null;
+  @StorageProp('statusBarHeightPx') @Watch('updateTopInset') private statusBarHeightPx: number = 0;
+  @State private webScrollOffset: number = 0;
   @State isLoading: boolean = true;
   @State hasError: boolean = false;
   @State errorMessage: string = '';
   private storyId: string = '';
   private webController: webview.WebviewController = new webview.WebviewController();
   private documentHtml: string = '';
+  private webReady: boolean = false;
+
+  private getTitleInset(): number {
+    return MINI_TITLE_BAR_HEIGHT + this.getUIContext().px2vp(this.statusBarHeightPx);
+  }
+
+  private updateTopInset(): void {
+    if (this.webReady) {
+      updateReaderTopInset(this.webController, this.getTitleInset());
+    }
+  }
 
   private buildDocument(detail: ZhihuDailyDetail): string {
     const css: string = 'body{margin:0;padding:16px;font-size:16px;line-height:1.75;color:#1A1A1A;' +
+      'padding-top:calc(var(--reader-top-inset,' + this.getTitleInset() + 'px) + 16px);' +
       'word-break:break-word;background:#FFFFFF;font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",sans-serif;}' +
       'img{max-width:100%;height:auto;border-radius:4px;}' +
       'a{color:#0066FF;text-decoration:none;}' +
@@ -35,17 +52,21 @@ export struct DailyStoryPage {
 
   private load(): void {
     this.isLoading = true;
+    this.webScrollOffset = 0;
     this.hasError = false;
+    this.documentHtml = '';
     ZhihuApi.getInstance().fetchDailyStory(this.storyId)
       .then((detail: ZhihuDailyDetail): void => {
         this.detail = detail;
+        if (detail.bodyHtml.trim().length === 0) {
+          throw new Error('知乎日报未返回正文，请重试');
+        }
         this.documentHtml = this.buildDocument(detail);
-        this.isLoading = false;
         this.applyDocument();
         HistoryStore.getInstance().record(getContext(this), 'daily', this.storyId, detail.title)
           .catch((): void => {});
       })
-      .catch((error: ZhihuHttpError): void => {
+      .catch((error: Error): void => {
         this.isLoading = false;
         this.hasError = true;
         this.errorMessage = error.message;
@@ -53,28 +74,42 @@ export struct DailyStoryPage {
   }
 
   private applyDocument(): void {
-    if (this.documentHtml.length === 0) {
+    if (!this.webReady || this.documentHtml.length === 0) {
       return;
     }
     try {
-      this.webController.loadData(this.documentHtml, 'text/html', 'utf-8');
+      loadReaderDocument(this.webController, this.documentHtml);
+      this.isLoading = false;
     } catch (error) {
-      setTimeout((): void => {
-        try {
-          this.webController.loadData(this.documentHtml, 'text/html', 'utf-8');
-        } catch (ignored) {
-          // content may fail to render on slow mounts
-        }
-      }, 300);
+      this.isLoading = false;
+      this.hasError = true;
+      this.errorMessage = '正文渲染失败，请重试';
     }
   }
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
       Stack() {
-        Web({ src: 'about:blank', controller: this.webController })
+        Web({ src: 'about:blank', controller: this.webController, renderMode: RenderMode.SYNC_RENDER })
           .width('100%')
-          .height('100%')
+          .height(LayoutPolicy.matchParent)
+          .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
+          .onScroll((event: OnScrollEvent) => {
+            this.webScrollOffset = Math.min(this.getTitleInset(), Math.round(Math.max(0, event.yOffset)));
+          })
+          .onPageEnd((event) => {
+            if (!this.webReady && event?.url === 'about:blank') {
+              this.webReady = true;
+              this.applyDocument();
+            }
+          })
+          .onErrorReceive((event) => {
+            if (event?.request.isMainFrame()) {
+              this.isLoading = false;
+              this.hasError = true;
+              this.errorMessage = '正文渲染失败，请重试';
+            }
+          })
           .visibility(this.isLoading || this.hasError ? Visibility.Hidden : Visibility.Visible)
         if (this.isLoading) {
           LoadingView()
@@ -89,9 +124,12 @@ export struct DailyStoryPage {
         }
       }
       .width('100%')
-      .height('100%')
+      .height(LayoutPolicy.matchParent)
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     }
-    .title(this.detail !== null && this.detail.title.length > 0 ? this.detail.title : '日报')
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .titleBar(pageTitleBar(this.detail?.title || '日报', this.getTitleInset(), this.webScrollOffset))
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP])
     .backgroundColor('#FFFFFF')
     .onReady((context: NavDestinationContext) => {
       this.pathStack = context.pathStack;

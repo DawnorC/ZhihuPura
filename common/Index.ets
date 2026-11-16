@@ -6,11 +6,21 @@ export { encryptZseV4, createZse96Header, ZSE_93_WEB } from './src/main/ets/zhih
 
 export { ZhihuSession, ZhihuUser } from './src/main/ets/zhihu/ZhihuSession';
 
-export { ZhihuHttp, ZhihuHttpError, ZhihuHttpResponse, ZHIHU_WEB_UA, ZHIHU_APP_UA } from './src/main/ets/zhihu/ZhihuHttp';
+export { ZhihuHttp, ZhihuHttpError, ZhihuHttpResponse, ZHIHU_WEB_UA, ZHIHU_APP_UA, ZHIHU_QR_UA }
+  from './src/main/ets/zhihu/ZhihuHttp';
 
 export { ZhihuContentType } from './src/main/ets/zhihu/ZhihuContentType';
 
-export { ZhihuApi } from './src/main/ets/zhihu/ZhihuApi';
+export { ZhihuApi, ZhihuSearchFilters } from './src/main/ets/zhihu/ZhihuApi';
+export {
+  isZhihuVerificationPage,
+  ZHIHU_RISK_CONTROL_URL,
+  ZhihuLoginVerificationError,
+  ZhihuQrLogin,
+  ZhihuQrLoginStatus,
+  ZhihuQrTicket
+} from './src/main/ets/zhihu/ZhihuQrLogin';
+export { normalizeZhihuPhoneNumber, ZhihuPhoneLogin } from './src/main/ets/zhihu/ZhihuPhoneLogin';
 
 export { BlockStore } from './src/main/ets/zhihu/BlockStore';
 export { HistoryEntry, HistoryStore } from './src/main/ets/zhihu/HistoryStore';
@@ -26,6 +36,10 @@ export {
   ZhihuDailyStory,
   ZhihuDailySection,
   ZhihuDailyDetail,
+  OnlineHistoryEntry,
+  OnlineHistoryPage,
+  ZhihuCollection,
+  ZhihuCollectionPage,
   IRawPaging,
   IRawPerson,
   IRawTarget,

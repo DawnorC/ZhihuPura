@@ -36,6 +36,11 @@
       "pageSourceFile": "src/main/ets/pages/DailyStoryPage.ets"
     },
     {
+      "name": "collections",
+      "buildFunction": "CollectionsBuilder",
+      "pageSourceFile": "src/main/ets/pages/CollectionsPage.ets"
+    },
+    {
       "name": "history",
       "buildFunction": "HistoryBuilder",
       "pageSourceFile": "src/main/ets/pages/HistoryPage.ets"

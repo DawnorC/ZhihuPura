@@ -22,12 +22,19 @@ interface IUserRaw {
   headline?: string;
 }
 
+interface SessionSnapshot {
+  cookies: Record<string, string>;
+  user: IUserRaw;
+}
+
 export class ZhihuSession {
   private static readonly instance: ZhihuSession = new ZhihuSession();
   private pref: preferences.Preferences | null = null;
   private cookieMap: Record<string, string> = {};
   readonly user: ZhihuUser = new ZhihuUser();
   private initPromise: Promise<void> | null = null;
+  private pendingWrite: Promise<void> = Promise.resolve();
+  private revision: number = 0;
 
   public static getInstance(): ZhihuSession {
     return ZhihuSession.instance;
@@ -35,13 +42,25 @@ export class ZhihuSession {
 
   public init(context: common.Context): Promise<void> {
     if (this.initPromise === null) {
-      this.initPromise = this.doInit(context);
+      this.initPromise = this.doInit(context).catch((error: Error): void => {
+        this.initPromise = null;
+        throw error;
+      });
     }
     return this.initPromise;
   }
 
   private async doInit(context: common.Context): Promise<void> {
     this.pref = await preferences.getPreferences(context, 'zhihu_session');
+    const snapshotJson = await this.pref.get('session_v2', '');
+    if (typeof snapshotJson === 'string' && snapshotJson.length > 0) {
+      try {
+        this.restoreSnapshot(JSON.parse(snapshotJson) as SessionSnapshot);
+        return;
+      } catch (error) {
+        // Read the previous cache format if the current entry is unreadable.
+      }
+    }
     const cookieJson = await this.pref.get('cookies', '');
     if (typeof cookieJson === 'string' && cookieJson.length > 0) {
       try {
@@ -53,32 +72,75 @@ export class ZhihuSession {
     const userJson = await this.pref.get('user', '');
     if (typeof userJson === 'string' && userJson.length > 0) {
       try {
-        const raw = JSON.parse(userJson) as IUserRaw;
-        this.user.id = raw.id ?? '';
-        this.user.name = raw.name ?? '';
-        this.user.avatarUrl = raw.avatar_url ?? '';
-        this.user.urlToken = raw.url_token ?? '';
-        this.user.headline = raw.headline ?? '';
+        this.restoreUser(JSON.parse(userJson) as IUserRaw);
       } catch (error) {
         // ignore malformed user cache
       }
     }
   }
 
-  public async persist(): Promise<void> {
-    if (this.pref === null) {
-      return;
-    }
-    await this.pref.put('cookies', JSON.stringify(this.cookieMap));
-    const userRaw: IUserRaw = {
-      id: this.user.id,
-      name: this.user.name,
-      avatar_url: this.user.avatarUrl,
-      url_token: this.user.urlToken,
-      headline: this.user.headline
+  private snapshot(): SessionSnapshot {
+    return {
+      cookies: this.cookieMap,
+      user: {
+        id: this.user.id,
+        name: this.user.name,
+        avatar_url: this.user.avatarUrl,
+        url_token: this.user.urlToken,
+        headline: this.user.headline
+      }
     };
-    await this.pref.put('user', JSON.stringify(userRaw));
-    await this.pref.flush();
+  }
+
+  private restoreUser(raw: IUserRaw): void {
+    this.user.id = raw.id ?? '';
+    this.user.name = raw.name ?? '';
+    this.user.avatarUrl = raw.avatar_url ?? '';
+    this.user.urlToken = raw.url_token ?? '';
+    this.user.headline = raw.headline ?? '';
+  }
+
+  private restoreSnapshot(snapshot: SessionSnapshot): void {
+    if (!snapshot?.user || !snapshot.cookies || typeof snapshot.cookies !== 'object') {
+      throw new Error('会话缓存格式异常');
+    }
+    this.restoreUser(snapshot.user);
+    this.cookieMap = snapshot.cookies;
+    this.revision++;
+  }
+
+  public getRevision(): number {
+    return this.revision;
+  }
+
+  private enqueueWrite(write: () => Promise<void>): Promise<void> {
+    const task = this.pendingWrite.then(write);
+    this.pendingWrite = task.catch((): void => {});
+    return task;
+  }
+
+  private async writeSnapshot(snapshot: string): Promise<void> {
+    if (this.pref !== null) {
+      await this.pref.put('session_v2', snapshot);
+      await this.pref.delete('cookies');
+      await this.pref.delete('user');
+      await this.pref.flush();
+    }
+  }
+
+  public persist(): Promise<void> {
+    return this.enqueueWrite(() => this.writeSnapshot(JSON.stringify(this.snapshot())));
+  }
+
+  public adoptVerifiedSession(candidate: ZhihuSession): Promise<void> {
+    if (!candidate.isLoggedIn() || candidate.user.id.length === 0 || this.pref === null) {
+      return Promise.reject(new Error('登录会话无法保存，请重试'));
+    }
+    const snapshot = JSON.stringify(candidate.snapshot());
+    return this.enqueueWrite(async (): Promise<void> => {
+      await this.writeSnapshot(snapshot);
+      this.restoreSnapshot(JSON.parse(snapshot) as SessionSnapshot);
+    });
   }
 
   public getCookie(name: string): string {
@@ -116,7 +178,7 @@ export class ZhihuSession {
   }
 
   public applyCookieString(cookieString: string): void {
-    if (cookieString.length === 0) {
+    if (!cookieString || /[\r\n\x00]/.test(cookieString)) {
       return;
     }
     const segments = cookieString.split(';');
@@ -126,7 +188,8 @@ export class ZhihuSession {
       if (eqIndex > 0) {
         const name = segment.substring(0, eqIndex).trim();
         const value = segment.substring(eqIndex + 1).trim();
-        if (name.length > 0 && value.length > 0) {
+        if (/^[\w.-]+$/.test(name) && !/^(domain|path|expires|max-age|httponly|secure|samesite)$/i.test(name) &&
+          value.length > 0) {
           this.cookieMap[name] = value;
         }
       }
@@ -168,12 +231,10 @@ export class ZhihuSession {
   }
 
   public async logout(): Promise<void> {
-    this.cookieMap = {};
-    this.user.id = '';
-    this.user.name = '';
-    this.user.avatarUrl = '';
-    this.user.urlToken = '';
-    this.user.headline = '';
-    await this.persist();
+    const empty: SessionSnapshot = { cookies: {}, user: {} };
+    await this.enqueueWrite(async (): Promise<void> => {
+      await this.writeSnapshot(JSON.stringify(empty));
+      this.restoreSnapshot(empty);
+    });
   }
 }

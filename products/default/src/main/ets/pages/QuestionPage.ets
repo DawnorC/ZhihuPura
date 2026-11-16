@@ -1,9 +1,12 @@
+import { HdsNavDestination, HdsNavDestinationTitleMode, HideMode } from '@kit.UIDesignKit';
+import { MINI_TITLE_BAR_HEIGHT, pageTitleBar } from '../view/NavigationChrome';
 /**
  * Question detail page, ported from QuestionScreen.kt: question header + paged answer list.
  */
 import {
   HistoryStore,
   ZhihuApi,
+  ZhihuContentType,
   ZhihuFeedItem,
   ZhihuFeedPage,
   ZhihuHttpError,
@@ -16,6 +19,7 @@ import { LoadingView, ErrorView, EmptyView } from '../view/Widgets';
 import {
   QuestionPageParam,
   openFeedItem,
+  ContentPageParam,
   APP_COLOR_BLUE,
   APP_COLOR_SECONDARY,
   APP_COLOR_TEXT,
@@ -25,6 +29,7 @@ import {
 @Component
 export struct QuestionPage {
   pathStack: NavPathStack = new NavPathStack();
+  @StorageProp('statusBarHeightPx') private statusBarHeightPx: number = 0;
   @State question: ZhihuQuestion | null = null;
   @State items: ZhihuFeedItem[] = [];
   @State isLoading: boolean = true;
@@ -32,9 +37,14 @@ export struct QuestionPage {
   @State errorMessage: string = '';
   @State sortByTime: boolean = false;
   @State loadingMore: boolean = false;
+  private readonly scroller: Scroller = new Scroller();
   private questionId: string = '';
   private nextUrl: string = '';
   private isEnd: boolean = false;
+
+  private getTitleInset(): number {
+    return MINI_TITLE_BAR_HEIGHT + this.getUIContext().px2vp(this.statusBarHeightPx);
+  }
 
   private loadQuestion(): void {
     ZhihuApi.getInstance().fetchQuestion(this.questionId)
@@ -87,7 +97,7 @@ export struct QuestionPage {
   }
 
   build() {
-    NavDestination() {
+    HdsNavDestination() {
       Column() {
         if (this.isLoading) {
           LoadingView()
@@ -101,7 +111,10 @@ export struct QuestionPage {
           })
             .layoutWeight(1)
         } else {
-          List({ space: 0 }) {
+          List({ space: 0, scroller: this.scroller }) {
+            ListItem() {
+              Column().height(this.getTitleInset())
+            }
             if (this.question !== null) {
               ListItem() {
                 Column({ space: 8 }) {
@@ -143,7 +156,23 @@ export struct QuestionPage {
                   FeedCard({
                     item: item,
                     onOpen: (opened: ZhihuFeedItem): void => {
-                      openFeedItem(this.pathStack, opened);
+                      const answers = this.items.filter((item: ZhihuFeedItem): boolean =>
+                        item.contentType === ZhihuContentType.Answer);
+                      if (opened.contentType !== ZhihuContentType.Answer) {
+                        openFeedItem(this.pathStack, opened);
+                        return;
+                      }
+                      const param: ContentPageParam = {
+                        kind: 'answer',
+                        id: opened.id,
+                        title: this.question?.title ?? opened.title,
+                        questionId: this.questionId,
+                        answerIds: answers.map((item: ZhihuFeedItem): string => item.id),
+                        nextAnswerPage: this.isEnd ? '' : this.nextUrl,
+                        answerListEnd: this.isEnd,
+                        answerOrder: this.sortByTime ? 'created' : 'default'
+                      };
+                      this.pathStack.pushPathByName('content', param);
                     }
                   })
                   Divider()
@@ -170,16 +199,30 @@ export struct QuestionPage {
           }
           .width('100%')
           .height('100%')
-          .backgroundColor(APP_COLOR_BG)
+          .clip(false)
+          .cachedCount(3, true)
+          .backgroundColor('#FFFFFF')
           .onReachEnd(() => {
             this.loadMore();
+          })
+          .onScrollIndex((start: number, end: number) => {
+            // Prefetch ahead so the list rarely reaches its end, where the
+            // HDS title bar forces itself visible.
+            if (this.items.length > 0 && end >= this.items.length - 2) {
+              this.loadMore();
+            }
           })
         }
       }
       .width('100%')
-      .height('100%')
+      .height(LayoutPolicy.matchParent)
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     }
-    .title('问题')
+    .titleMode(HdsNavDestinationTitleMode.MINI)
+    .dynamicHideTitleBar({ hideTitleArea: true, mode: HideMode.SCROLL_UP })
+    .titleBar(pageTitleBar('问题', this.getTitleInset()))
+    .bindToScrollable([this.scroller])
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP])
     .backgroundColor(APP_COLOR_BG)
     .onReady((context: NavDestinationContext) => {
       this.pathStack = context.pathStack;
