@@ -46,6 +46,11 @@ export struct QuestionPage {
     return MINI_TITLE_BAR_HEIGHT + this.getUIContext().px2vp(this.statusBarHeightPx);
   }
 
+  private getQuestionTitle(): string {
+    return this.question?.title || this.items.find((item: ZhihuFeedItem): boolean =>
+      item.contentType === ZhihuContentType.Answer && item.title.length > 0)?.title || '';
+  }
+
   private loadQuestion(): void {
     ZhihuApi.getInstance().fetchQuestion(this.questionId)
       .then((question: ZhihuQuestion): void => {
@@ -115,24 +120,26 @@ export struct QuestionPage {
             ListItem() {
               Column().height(this.getTitleInset())
             }
-            if (this.question !== null) {
+            if (this.question !== null || this.getQuestionTitle().length > 0) {
               ListItem() {
                 Column({ space: 8 }) {
-                  Text(this.question.title)
+                  Text(this.getQuestionTitle())
                     .fontSize(18)
                     .fontWeight(FontWeight.Bold)
                     .fontColor(APP_COLOR_TEXT)
                     .lineHeight(26)
-                  if (this.question.detailHtml.length > 0) {
-                    Text(stripHtml(this.question.detailHtml))
-                      .fontSize(14)
-                      .fontColor('#444444')
-                      .lineHeight(21)
+                  if (this.question !== null) {
+                    if (this.question.detailHtml.length > 0) {
+                      Text(stripHtml(this.question.detailHtml))
+                        .fontSize(14)
+                        .fontColor('#444444')
+                        .lineHeight(21)
+                    }
+                    Text(formatCount(this.question.followerCount) + ' 人关注 · ' +
+                      formatCount(this.question.answerCount) + ' 个回答')
+                      .fontSize(12)
+                      .fontColor(APP_COLOR_SECONDARY)
                   }
-                  Text(formatCount(this.question.followerCount) + ' 人关注 · ' +
-                    formatCount(this.question.answerCount) + ' 个回答')
-                    .fontSize(12)
-                    .fontColor(APP_COLOR_SECONDARY)
                   Row({ space: 8 }) {
                     this.sortChip('默认排序', false)
                     this.sortChip('按时间排序', true)
@@ -155,6 +162,7 @@ export struct QuestionPage {
                 Column() {
                   FeedCard({
                     item: item,
+                    showTitle: item.contentType !== ZhihuContentType.Answer,
                     onOpen: (opened: ZhihuFeedItem): void => {
                       const answers = this.items.filter((item: ZhihuFeedItem): boolean =>
                         item.contentType === ZhihuContentType.Answer);
@@ -165,7 +173,7 @@ export struct QuestionPage {
                       const param: ContentPageParam = {
                         kind: 'answer',
                         id: opened.id,
-                        title: this.question?.title ?? opened.title,
+                        title: this.question?.title || opened.title,
                         questionId: this.questionId,
                         answerIds: answers.map((item: ZhihuFeedItem): string => item.id),
                         nextAnswerPage: this.isEnd ? '' : this.nextUrl,

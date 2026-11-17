@@ -10,6 +10,7 @@ const AVATAR_BG_COLORS: string[] = ['#0066FF', '#EC4141', '#F5A623', '#33CC99', 
 @Component
 export struct FeedCard {
   item: ZhihuFeedItem = new ZhihuFeedItem();
+  @Prop showTitle: boolean = true;
   onOpen: (item: ZhihuFeedItem) => void = (item: ZhihuFeedItem): void => {
   };
 
@@ -31,7 +32,7 @@ export struct FeedCard {
             .fontColor(APP_COLOR_BLUE)
             .maxLines(1)
         }
-        if (this.item.title.length > 0) {
+        if (this.showTitle && this.item.title.length > 0) {
           Text(this.item.title)
             .fontSize(16)
             .fontWeight(FontWeight.Bold)
