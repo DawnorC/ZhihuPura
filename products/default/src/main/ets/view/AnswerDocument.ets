@@ -1,9 +1,14 @@
 import { formatCount, formatRelativeTime, ZhihuContent } from '@ohos/common';
 
 export const ANSWER_ACTION_ORIGIN: string = 'https://answer-reader.zhihupura.invalid/';
-export const ANSWER_ACTION_COUNT_OFFSET: number = 6;
+export const ANSWER_ACTION_ICON_SIZE: number = 28;
+export const ANSWER_ACTION_COUNT_OFFSET: number = 8;
+export const ANSWER_SCROLLBAR_HTML: string = '<div id="reader-scrollbar" aria-hidden="true">' +
+  '<div id="reader-scrollbar-position"><span></span></div></div>';
 
 export const ANSWER_DOCUMENT_STYLE: string = `
+  html {scrollbar-width:none;}
+  html::-webkit-scrollbar {display:none;}
   .reader-answer {margin:0 -16px;padding:16px 16px 14px;}
   .reader-answer + .reader-answer {border-top:6px solid #f1f3f5;}
   .answer-byline {display:flex;align-items:center;gap:9px;min-height:44px;margin-bottom:10px;}
@@ -28,14 +33,118 @@ export const ANSWER_DOCUMENT_STYLE: string = `
   .answer-tools .answer-discuss {flex:1;min-width:0;height:38px;margin-right:8px;
     padding:0 9px;border-radius:20px;background:#f5f6f8;color:#737e90;font-size:13px;white-space:nowrap;}
   .answer-tools .answer-tool {position:relative;}
-  .answer-tools .answer-count {position:absolute;top:3px;left:calc(50% + ${ANSWER_ACTION_COUNT_OFFSET}px);
-    color:inherit;font-size:9px;line-height:12px;white-space:nowrap;pointer-events:none;}
-  .answer-tools svg,.answer-share svg {width:21px;height:21px;flex:none;}
+  .answer-tools .answer-count {position:absolute;top:0;left:calc(50% + ${ANSWER_ACTION_COUNT_OFFSET}px);
+    color:inherit;font-size:10px;line-height:12px;white-space:nowrap;pointer-events:none;}
+  .answer-tools svg {width:${ANSWER_ACTION_ICON_SIZE}px;height:${ANSWER_ACTION_ICON_SIZE}px;flex:none;}
+  .answer-share svg {width:21px;height:21px;flex:none;}
   #reader-answer-end {display:block;text-align:center;margin:12px 16px;color:#56677e;font-size:13px;}
   #reader-answer-end:empty {display:none;}
+  #reader-scrollbar {position:fixed;z-index:2;top:calc(var(--reader-top-inset, 0px) + 4px);right:3px;bottom:4px;
+    width:3px;overflow:hidden;pointer-events:none;opacity:0;transition:opacity 160ms ease;}
+  #reader-scrollbar.visible {opacity:1;}
+  #reader-scrollbar-position {position:absolute;top:0;width:100%;will-change:transform;}
+  #reader-scrollbar-position span {display:block;width:100%;height:100%;border-radius:3px;
+    background:rgba(55,59,66,.45);transform-origin:top center;}
 `;
 
 export const ANSWER_DOCUMENT_SCRIPT: string = `
+  const scrollbar = document.getElementById("reader-scrollbar");
+  const scrollbarPosition = document.getElementById("reader-scrollbar-position");
+  const scrollbarThumb = scrollbarPosition.firstElementChild;
+  let scrollbarFrame = 0;
+  let scrollbarTimer = 0;
+  let scrollbarAnimation;
+
+  function updateAnswerScrollbar(show) {
+    const doc = document.scrollingElement;
+    const range = doc.scrollHeight - doc.clientHeight;
+    const trackHeight = scrollbar.clientHeight;
+    if (range <= 0 || trackHeight <= 0) {
+      scrollbar.classList.remove("visible");
+      return false;
+    }
+    const height = Math.min(trackHeight, Math.max(22, trackHeight * doc.clientHeight / doc.scrollHeight));
+    const progress = Math.max(0, Math.min(1, doc.scrollTop / range));
+    scrollbarPosition.style.height = height + "px";
+    scrollbarPosition.style.transform = "translate3d(0," + (trackHeight - height) * progress + "px,0)";
+    if (show) {
+      scrollbar.classList.add("visible");
+      clearTimeout(scrollbarTimer);
+      scrollbarTimer = setTimeout(() => scrollbar.classList.remove("visible"), 700);
+    }
+    return true;
+  }
+
+  window.addEventListener("scroll", () => {
+    if (scrollbarFrame) return;
+    scrollbarFrame = requestAnimationFrame(() => {
+      scrollbarFrame = 0;
+      updateAnswerScrollbar(true);
+    });
+  }, { passive:true });
+  window.addEventListener("resize", () => updateAnswerScrollbar(false));
+  new ResizeObserver(() => updateAnswerScrollbar(false)).observe(document.body);
+
+  function animateAnswerScrollbar(before) {
+    scrollbarAnimation?.cancel();
+    if (!updateAnswerScrollbar(true) || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const after = scrollbarThumb.getBoundingClientRect();
+    const shift = before.top - after.top;
+    if (before.height <= 0 || after.height <= 0 || (Math.abs(shift) < 1 && Math.abs(before.height - after.height) < 1)) {
+      return;
+    }
+    scrollbarAnimation = scrollbarThumb.animate([
+      { transform: "translateY(" + shift + "px) scaleY(" + before.height / after.height + ")" },
+      { transform: "none" }
+    ], { duration: 280, easing: "cubic-bezier(.22,.78,.35,1.18)" });
+  }
+
+  function insertReaderAnswers(html, prepend) {
+    const first = document.querySelector(".reader-answer");
+    const end = document.getElementById("reader-answer-end");
+    if (!first || !end) return false;
+    const doc = document.scrollingElement;
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    prepareReaderImages(template.content, true);
+    updateAnswerScrollbar(false);
+    const before = scrollbarThumb.getBoundingClientRect();
+    if (prepend) {
+      const firstTop = first.getBoundingClientRect().top;
+      first.before(template.content);
+      doc.scrollTop += first.getBoundingClientRect().top - firstTop;
+    } else {
+      const scrollTop = doc.scrollTop;
+      end.before(template.content);
+      end.style.paddingBottom = "";
+      const extra = Math.ceil(scrollTop - (doc.scrollHeight - doc.clientHeight));
+      if (extra > 0) end.style.paddingBottom = extra + "px";
+      doc.scrollTop = scrollTop;
+    }
+    animateAnswerScrollbar(before);
+    return true;
+  }
+
+  function scrollToReaderAnswer(id, inset, gap) {
+    const answer = document.getElementById("answer-" + id);
+    const end = document.getElementById("reader-answer-end");
+    const doc = document.scrollingElement;
+    if (!answer || !end || doc.clientHeight <= 0) return false;
+    const top = Math.max(0, doc.scrollTop + answer.getBoundingClientRect().top - inset - gap);
+    const extra = Math.ceil(top - (doc.scrollHeight - doc.clientHeight));
+    if (extra > 0) end.style.paddingBottom = ((parseFloat(end.style.paddingBottom) || 0) + extra) + "px";
+    doc.scrollTop = top;
+    return true;
+  }
+
+  function mountInitialAnswers(openedId) {
+    const template = document.getElementById("reader-initial-answers");
+    for (const section of template.content.children) {
+      prepareReaderImages(section, section.dataset.answer !== openedId);
+    }
+    template.replaceWith(template.content);
+  }
+
   function firstAnswerBelow(sections, line, getEdge) {
     let low = 0;
     let high = sections.length;
@@ -73,6 +182,7 @@ export const ANSWER_DOCUMENT_SCRIPT: string = `
     const offset = (window.scrollY + viewportTop) * scale;
     return {
       id: sections[readingIndex].dataset.answer,
+      offset: offset,
       dockId: dock?.dataset.answer ?? null,
       long: !!dock && dock.getBoundingClientRect().height > innerHeight - inset - 20,
       before: Number.isFinite(before) ? offset + before * scale : null,

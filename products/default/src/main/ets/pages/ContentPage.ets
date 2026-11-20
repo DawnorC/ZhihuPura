@@ -10,7 +10,8 @@ import { webview } from '@kit.ArkWeb';
 import { SymbolGlyphModifier } from '@kit.ArkUI';
 import { createGlassMaterial, spatialTitleBar, MINI_TITLE_BAR_HEIGHT } from '../view/NavigationChrome';
 import {
-  ANSWER_ACTION_COUNT_OFFSET, ANSWER_ACTION_ORIGIN, ANSWER_DOCUMENT_SCRIPT, ANSWER_DOCUMENT_STYLE, ANSWER_VOTE_PATH,
+  ANSWER_ACTION_COUNT_OFFSET, ANSWER_ACTION_ICON_SIZE, ANSWER_ACTION_ORIGIN, ANSWER_DOCUMENT_SCRIPT, ANSWER_DOCUMENT_STYLE, ANSWER_SCROLLBAR_HTML,
+  ANSWER_VOTE_PATH,
   answerActionCount, answerVoteText, buildAnswerSection
 } from '../view/AnswerDocument';
 import { AnswerSequence } from '../view/AnswerSequence';
@@ -49,6 +50,7 @@ const ANSWER_ARROW_SIZE: number = 44;
 
 interface AnswerPosition {
   id: string;
+  offset: number;
   dockId: string | null;
   long: boolean;
   before: number | null;
@@ -87,6 +89,7 @@ export struct ContentPage {
   private previousRetryAt: number = 0;
   private nextRetryAt: number = 0;
   private endMessage: string = '';
+  private endRetry: boolean = false;
   @State private atFirstAnswer: boolean = false;
   @State private atLastAnswer: boolean = false;
   @State private jumpingAnswer: boolean = false;
@@ -101,9 +104,12 @@ export struct ContentPage {
   private beforeAnswerOffset: number = Number.NEGATIVE_INFINITY;
   private afterAnswerOffset: number = Number.POSITIVE_INFINITY;
   private lastReaderOffset: number = 0;
+  private initialReaderOffset: number = 0;
+  private readerMoved: boolean = false;
   private titleDirectionAnchor: number = 0;
   private adjustingScrollUntil: number = 0;
   private documentReady: boolean = false;
+  private positioningInitialAnswer: boolean = false;
   private readonly voteRequests: Set<string> = new Set<string>();
   private readonly followRequests: Set<string> = new Set<string>();
   private readonly followedAuthors: Map<string, boolean> = new Map<string, boolean>();
@@ -132,8 +138,9 @@ export struct ContentPage {
   }
 
   private buildDocument(content: ZhihuContent): string {
-    const css: string = 'body{margin:0;padding:16px;font-size:16px;line-height:1.75;color:#1A1A1A;' +
-      'padding-top:calc(var(--reader-top-inset,' + this.getTitleInset() + 'px) + 16px);' +
+    const css: string = ':root{--reader-top-inset:' + this.getTitleInset() + 'px;}' +
+      'body{margin:0;padding:16px;font-size:16px;line-height:1.75;color:#1A1A1A;' +
+      'padding-top:calc(var(--reader-top-inset) + 16px);' +
       'word-break:break-word;background:#FFFFFF;font-family:"HarmonyOS Sans SC","PingFang SC","Microsoft YaHei",sans-serif;}' +
       'img{max-width:100%;height:auto;border-radius:4px;}' +
       'a{color:#0066FF;text-decoration:none;}' +
@@ -151,13 +158,27 @@ export struct ContentPage {
       'if(lazy)image.loading="lazy";image.decoding="async";image.removeAttribute("srcset");' +
       'const width=Number(image.getAttribute("data-rawwidth"));const height=Number(image.getAttribute("data-rawheight"));' +
       'if(width>0&&height>0&&!image.hasAttribute("width")&&!image.hasAttribute("height")){' +
-      'image.width=width;image.height=height;}if(source)image.src=source;}}prepareReaderImages(document,false);';
+      'image.width=width;image.height=height;}if(source)image.src=source;}}';
+    const answer = this.kind === 'answer';
+    const last = this.renderedIds[this.renderedIds.length - 1];
+    const retryLink = this.endRetry && last ?
+      ' · <a href="' + ANSWER_ACTION_ORIGIN + encodeURIComponent(last) + '/retry">重试</a>' : '';
+    const readerBody = answer ? '<template id="reader-initial-answers">' + this.buildAnswerBatch(this.renderedIds) +
+      '</template><footer id="reader-answer-end" role="status">' +
+      (this.endMessage || '正在预加载更多回答…') + retryLink + '</footer>' + ANSWER_SCROLLBAR_HTML : content.contentHtml;
+    const readerScript = answer ? ANSWER_DOCUMENT_SCRIPT + 'mountInitialAnswers(' + JSON.stringify(this.openedAnswerId) +
+      ');' : 'prepareReaderImages(document,false);';
     return '<!DOCTYPE html><html><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=3">' +
-      '<style>' + css + (this.kind === 'answer' ? ANSWER_DOCUMENT_STYLE : '') + '</style></head><body>' +
-      (this.kind === 'answer' ? buildAnswerSection(this.contentId, content) +
-        '<footer id="reader-answer-end" role="status">正在预加载更多回答…</footer>' : content.contentHtml) +
-      '<script>' + script + (this.kind === 'answer' ? ANSWER_DOCUMENT_SCRIPT : '') + '</script></body></html>';
+      '<style>' + css + (answer ? ANSWER_DOCUMENT_STYLE : '') + '</style></head><body>' + readerBody +
+      '<script>' + script + readerScript + '</script></body></html>';
+  }
+
+  private buildAnswerBatch(ids: string[]): string {
+    return ids.map((id: string): string => {
+      const content = this.loadedAnswers.get(id);
+      return content === undefined ? '' : buildAnswerSection(id, content);
+    }).join('');
   }
 
   private load(): void {
@@ -165,6 +186,8 @@ export struct ContentPage {
     this.isLoading = true;
     this.webScrollOffset = 0;
     this.lastReaderOffset = 0;
+    this.initialReaderOffset = 0;
+    this.readerMoved = false;
     this.titleDirectionAnchor = 0;
     this.adjustingScrollUntil = 0;
     this.beforeAnswerOffset = Number.NEGATIVE_INFINITY;
@@ -175,7 +198,8 @@ export struct ContentPage {
     this.hasError = false;
     this.documentHtml = '';
     this.documentReady = false;
-    this.readerGeneration++;
+    this.positioningInitialAnswer = false;
+    const generation = ++this.readerGeneration;
     this.openedAnswerId = this.contentId;
     this.sequence = this.routeParams === undefined ? undefined : new AnswerSequence(this.routeParams);
     this.renderedIds = [];
@@ -184,6 +208,7 @@ export struct ContentPage {
     this.previousRetryAt = 0;
     this.nextRetryAt = 0;
     this.endMessage = '';
+    this.endRetry = false;
     this.atFirstAnswer = false;
     this.atLastAnswer = false;
     this.jumpingAnswer = false;
@@ -199,7 +224,10 @@ export struct ContentPage {
       task = api.fetchAnswer(this.contentId);
     }
     task
-      .then((content: ZhihuContent): void => {
+      .then(async (content: ZhihuContent): Promise<void> => {
+        if (generation !== this.readerGeneration) {
+          return;
+        }
         if (this.kind !== 'answer') {
           this.content = content;
           this.readActionState(content);
@@ -214,6 +242,14 @@ export struct ContentPage {
         if (this.kind === 'answer') {
           this.loadedAnswers.set(this.contentId, content);
           this.renderedIds = [this.contentId];
+          if (this.questionId.length > 0) {
+            await Promise.all([this.prefetchDirection(-1, PREVIOUS_BUFFER), this.prefetchDirection(1, NEXT_BUFFER)]);
+          } else {
+            this.showEndOfAnswers('暂未取得问题信息，无法接续回答');
+          }
+        }
+        if (generation !== this.readerGeneration) {
+          return;
         }
         this.documentHtml = this.buildDocument(content);
         this.applyDocument();
@@ -221,9 +257,11 @@ export struct ContentPage {
           .catch((): void => {});
       })
       .catch((error: Error): void => {
-        this.isLoading = false;
-        this.hasError = true;
-        this.errorMessage = error.message;
+        if (generation === this.readerGeneration) {
+          this.isLoading = false;
+          this.hasError = true;
+          this.errorMessage = error.message;
+        }
       });
   }
 
@@ -233,11 +271,53 @@ export struct ContentPage {
     }
     try {
       loadReaderDocument(this.webController, this.documentHtml);
-      this.isLoading = false;
+      if (this.kind !== 'answer') {
+        this.isLoading = false;
+      }
     } catch (error) {
       this.isLoading = false;
       this.hasError = true;
       this.errorMessage = '正文渲染失败，请重试';
+    }
+  }
+
+  private async positionInitialAnswer(): Promise<void> {
+    if (this.positioningInitialAnswer || this.documentReady || !this.documentHtml || this.hasError) {
+      return;
+    }
+    this.positioningInitialAnswer = true;
+    const generation = this.readerGeneration;
+    const inset = this.getTitleInset();
+    try {
+      const source = '(() => {document.documentElement.style.setProperty("--reader-top-inset",' +
+        JSON.stringify(inset + 'px') + ');if(!scrollToReaderAnswer(' + JSON.stringify(this.openedAnswerId) +
+        ',' + inset + ',16))return "null";return JSON.stringify(readAnswerPosition(' + inset + ',' +
+        this.getDockClearance() + '));})()';
+      const position = this.parseAnswerPosition(await this.webController.runJavaScript(source));
+      if (generation !== this.readerGeneration || this.hasError) {
+        return;
+      }
+      if (position === null || position.id !== this.openedAnswerId) {
+        throw new Error('无法定位初始回答');
+      }
+      this.lastReaderOffset = position.offset;
+      this.initialReaderOffset = position.offset;
+      this.titleDirectionAnchor = position.offset;
+      this.adjustingScrollUntil = Date.now() + 180;
+      this.webScrollOffset = Math.min(inset, Math.round(position.offset / 8) * 8);
+      this.applyAnswerPosition(position);
+      this.documentReady = true;
+      this.isLoading = false;
+    } catch (error) {
+      if (generation === this.readerGeneration) {
+        this.isLoading = false;
+        this.hasError = true;
+        this.errorMessage = '正文定位失败，请重试';
+      }
+    } finally {
+      if (generation === this.readerGeneration) {
+        this.positioningInitialAnswer = false;
+      }
     }
   }
 
@@ -524,6 +604,9 @@ export struct ContentPage {
   }
 
   private prefetchAnswers(): void {
+    if (!this.readerMoved) {
+      return;
+    }
     const active = this.renderedIds.indexOf(this.contentId);
     if (active < 0) {
       return;
@@ -661,39 +744,38 @@ export struct ContentPage {
   }
 
   private async insertAnswers(ids: string[], direction: number, generation: number): Promise<void> {
-    const prepend = direction < 0;
-    if (prepend) {
-      ids.reverse();
-      this.adjustingScrollUntil = Date.now() + 180;
-    }
-    const html = ids.map((id: string): string => {
-      const content = this.loadedAnswers.get(id);
-      return content === undefined ? '' : buildAnswerSection(id, content);
-    }).join('');
-    const result = await this.webController.runJavaScript(
-      '(() => {const first=document.querySelector(".reader-answer");const end=document.getElementById("reader-answer-end");' +
-      'if(!first||!end)return false;const template=document.createElement("template");' +
-      'template.innerHTML=' + JSON.stringify(html) + ';prepareReaderImages(template.content,true);' +
-      'const before=first.getBoundingClientRect().top;' +
-      (prepend ? 'first.before(template.content);document.scrollingElement.scrollTop+=first.getBoundingClientRect().top-before;'
-        : 'end.before(template.content);end.style.paddingBottom="";') + 'return true;})()'
-    );
     if (generation !== this.readerGeneration) {
       return;
     }
-    if (result !== 'true') {
-      ids.forEach((id: string): void => { this.loadedAnswers.delete(id); });
-      throw new Error('无法接续正文');
+    const prepend = direction < 0;
+    const batch = prepend ? ids.slice().reverse() : ids;
+    if (this.documentReady) {
+      if (prepend) {
+        this.adjustingScrollUntil = Date.now() + 180;
+      }
+      const result = await this.webController.runJavaScript(
+        'insertReaderAnswers(' + JSON.stringify(this.buildAnswerBatch(batch)) + ',' + prepend + ')');
+      if (generation !== this.readerGeneration) {
+        return;
+      }
+      if (result !== 'true') {
+        batch.forEach((id: string): void => { this.loadedAnswers.delete(id); });
+        throw new Error('无法接续正文');
+      }
     }
-    this.renderedIds = prepend ? ids.concat(this.renderedIds) : this.renderedIds.concat(ids);
+    this.renderedIds = prepend ? batch.concat(this.renderedIds) : this.renderedIds.concat(batch);
     this.scheduleAnswerCheck();
   }
 
   private showEndOfAnswers(message: string, retry: boolean = false): void {
-    if (message === this.endMessage) {
+    if (message === this.endMessage && retry === this.endRetry) {
       return;
     }
     this.endMessage = message;
+    this.endRetry = retry;
+    if (!this.documentReady) {
+      return;
+    }
     const last = this.renderedIds[this.renderedIds.length - 1];
     const retryUrl = retry && last !== undefined ? ANSWER_ACTION_ORIGIN + last + '/retry' : '';
     this.webController.runJavaScript('(() => {const end=document.getElementById("reader-answer-end");' +
@@ -744,13 +826,9 @@ export struct ContentPage {
       }
       this.adjustingScrollUntil = Date.now() + 180;
       const result = await this.webController.runJavaScript(
-        '(() => {const answer=document.getElementById(' + JSON.stringify('answer-' + nextId) +
-        '),end=document.getElementById("reader-answer-end"),doc=document.scrollingElement;' +
-        'if(!answer||!end)return false;const top=window.scrollY+answer.getBoundingClientRect().top-' +
-        (this.getTitleInset() + 6) + ';const extra=Math.ceil(top-(doc.scrollHeight-innerHeight));' +
-        'if(extra>0)end.style.paddingBottom=((parseFloat(end.style.paddingBottom)||0)+extra)+"px";' +
-        'window.scrollTo(0,top);return true;})()');
+        'scrollToReaderAnswer(' + JSON.stringify(nextId) + ',' + this.getTitleInset() + ',6)');
       if (result === 'true') {
+        this.readerMoved = true;
         this.activateAnswer(nextId);
         await this.updateVisibleAnswer();
         this.prefetchAnswers();
@@ -768,6 +846,12 @@ export struct ContentPage {
     if (this.kind !== 'answer') {
       this.webScrollOffset = Math.min(this.getTitleInset(), Math.round(current));
       return;
+    }
+    if (!this.documentReady) {
+      return;
+    }
+    if (Date.now() >= this.adjustingScrollUntil && Math.abs(current - this.initialReaderOffset) > 2) {
+      this.readerMoved = true;
     }
 
     if (this.jumpingAnswer || Date.now() < this.adjustingScrollUntil) {
@@ -824,8 +908,25 @@ export struct ContentPage {
   }
 
   aboutToDisappear(): void {
+    this.readerGeneration++;
     this.cancelAnswerCheck();
     this.recheckPosition = false;
+  }
+
+  private getDockClearance(): number {
+    return ANSWER_DOCK_HEIGHT + ANSWER_DOCK_BOTTOM_GAP + this.getUIContext().px2vp(this.bottomSafeAreaPx);
+  }
+
+  private parseAnswerPosition(result: string): AnswerPosition | null {
+    const value = JSON.parse(result) as string | AnswerPosition | null;
+    return typeof value === 'string' ? JSON.parse(value) as AnswerPosition | null : value;
+  }
+
+  private applyAnswerPosition(position: AnswerPosition): void {
+    this.activateAnswer(position.id);
+    this.selectDockAnswer(position.dockId, position.long);
+    this.beforeAnswerOffset = position.before ?? Number.NEGATIVE_INFINITY;
+    this.afterAnswerOffset = position.after ?? Number.POSITIVE_INFINITY;
   }
 
   private async updateVisibleAnswer(): Promise<void> {
@@ -839,19 +940,13 @@ export struct ContentPage {
     this.checkingPosition = true;
     const generation = this.readerGeneration;
     const scrollOffset = this.lastReaderOffset;
-    const clearance = ANSWER_DOCK_HEIGHT + ANSWER_DOCK_BOTTOM_GAP +
-      this.getUIContext().px2vp(this.bottomSafeAreaPx);
     try {
       const result = await this.webController.runJavaScript(
-        'JSON.stringify(readAnswerPosition(' + this.getTitleInset() + ',' + clearance + '))');
+        'JSON.stringify(readAnswerPosition(' + this.getTitleInset() + ',' + this.getDockClearance() + '))');
       if (generation === this.readerGeneration) {
-        const value = JSON.parse(result) as string | AnswerPosition | null;
-        const position = typeof value === 'string' ? JSON.parse(value) as AnswerPosition | null : value;
+        const position = this.parseAnswerPosition(result);
         if (position !== null && this.loadedAnswers.has(position.id)) {
-          this.activateAnswer(position.id);
-          this.selectDockAnswer(position.dockId, position.long);
-          this.beforeAnswerOffset = position.before ?? Number.NEGATIVE_INFINITY;
-          this.afterAnswerOffset = position.after ?? Number.POSITIVE_INFINITY;
+          this.applyAnswerPosition(position);
           if (this.lastReaderOffset !== scrollOffset && this.crossedAnswerBoundary(this.lastReaderOffset)) {
             this.recheckPosition = true;
           }
@@ -934,7 +1029,10 @@ export struct ContentPage {
           .width('100%')
           .height(LayoutPolicy.matchParent)
           .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.BOTTOM])
-          .visibility(this.isLoading || this.hasError ? Visibility.Hidden : Visibility.Visible)
+          .visibility(this.kind !== 'answer' && (this.isLoading || this.hasError) ? Visibility.Hidden : Visibility.Visible)
+          .opacity(this.isLoading || this.hasError ? 0 : 1)
+          .hitTestBehavior(this.isLoading || this.hasError ? HitTestMode.None : HitTestMode.Default)
+          .verticalScrollBarAccess(this.kind !== 'answer')
           .onScroll((event: OnScrollEvent) => { this.handleReaderScroll(event.yOffset); })
           .onOverScroll(() => { this.scheduleAnswerCheck(); })
           .onSizeChange(() => { this.scheduleAnswerCheck(); })
@@ -943,9 +1041,7 @@ export struct ContentPage {
               this.webReady = true;
               this.applyDocument();
             } else if (this.kind === 'answer' && this.documentHtml.length > 0 && !this.documentReady) {
-              this.documentReady = true;
-              this.prefetchAnswers();
-              this.updateVisibleAnswer();
+              this.positionInitialAnswer();
             }
           })
           .onLoadIntercept((event) => this.interceptAnswerAction(event.data))
@@ -1199,12 +1295,12 @@ export struct ContentPage {
     Button() {
       Stack() {
         if (icon !== null) {
-          SymbolGlyph(icon).fontSize(21).fontColor([selected ? APP_COLOR_BLUE : APP_COLOR_TEXT])
+          SymbolGlyph(icon).fontSize(ANSWER_ACTION_ICON_SIZE).fontColor([selected ? APP_COLOR_BLUE : APP_COLOR_TEXT])
         } else if (action === 'more') {
-          Column({ space: 3 }) {
-            Circle({ width: 3.5, height: 3.5 }).fill(APP_COLOR_TEXT)
-            Circle({ width: 3.5, height: 3.5 }).fill(APP_COLOR_TEXT)
-            Circle({ width: 3.5, height: 3.5 }).fill(APP_COLOR_TEXT)
+          Column({ space: 4 }) {
+            Circle({ width: 4.5, height: 4.5 }).fill(APP_COLOR_TEXT)
+            Circle({ width: 4.5, height: 4.5 }).fill(APP_COLOR_TEXT)
+            Circle({ width: 4.5, height: 4.5 }).fill(APP_COLOR_TEXT)
           }
         } else {
           Shape() {
@@ -1214,16 +1310,16 @@ export struct ContentPage {
               .fill(selected ? APP_COLOR_BLUE : Color.Transparent)
           }
           .viewPort({ width: '24px', height: '24px' })
-          .width(24)
-          .height(24)
+          .width(32)
+          .height(32)
           .rotate({ angle: action === 'down' ? 180 : 0 })
         }
         if (count) {
           Text(count)
-            .fontSize(9)
+            .fontSize(10)
             .fontColor(selected ? APP_COLOR_BLUE : APP_COLOR_TEXT)
             .maxLines(1)
-            .position({ left: ANSWER_DOCK_ACTION_WIDTH / 2 + ANSWER_ACTION_COUNT_OFFSET, top: 2 })
+            .position({ left: ANSWER_DOCK_ACTION_WIDTH / 2 + ANSWER_ACTION_COUNT_OFFSET, top: 0 })
             .hitTestBehavior(HitTestMode.None)
         }
       }
